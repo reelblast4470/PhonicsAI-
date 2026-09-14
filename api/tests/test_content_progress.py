@@ -16,9 +16,9 @@ async def test_course_catalog_is_published_only(client):
     courses = (await client.get("/api/v1/content/courses", headers=auth(tok))).json()
     assert len(courses) == 1
     c = courses[0]
-    assert c["origin"] == "seed-dev", "seed content must be honestly labelled"
-    assert len(c["modules"]) == 6
-    assert len(c["modules"][0]["lessons"]) == 2
+    assert str(c["origin"]).startswith("seed"), "seed content must be honestly labelled"
+    assert len(c["modules"]) == 9  # 5 letter groups + families + skills + digraphs + blends
+    assert len(c["modules"][0]["lessons"]) == 6  # s a t p i n
 
 
 async def test_unpublished_course_invisible(client, db):
@@ -58,15 +58,18 @@ async def test_lesson_flow_awards_are_deterministic(client):
     sid = r.json()["id"]
 
     q = await first_question(client, tok, lesson_id)
-    correct_answer = next(a for a in q["answers"] if a["text"] == q.get("correct_text")) \
-        if q.get("correct_text") else None
 
-    # answer with a *claimed* correct=true but the FIRST (possibly wrong)
-    # answer id: the server must decide, client claims ignored.
-    first_answer = q["answers"][0]
+    # Pick a DB-proven WRONG answer and claim correct=true in the payload:
+    # the server must decide from the answer key, ignoring the client claim.
+    from app.db import get_session_factory as _gsf
+    from app.models import Answer as _A
+    from sqlalchemy import select as _sel
+    async with _gsf()() as _s:
+        wrong_id = str(await _s.scalar(_sel(_A.id).where(
+            _A.question_id == q["question_id"], _A.is_correct.is_(False))))
     r = await client.post(f"/api/v1/learners/{lid}/sessions/{sid}/events", json={
         "event_type": "question_answered",
-        "payload": {"question_id": q["question_id"], "answer_id": first_answer["id"],
+        "payload": {"question_id": q["question_id"], "answer_id": wrong_id,
                     "correct": True},
     }, headers=auth(tok))
     assert r.status_code == 200
@@ -80,7 +83,7 @@ async def test_lesson_flow_awards_are_deterministic(client):
             LearningEvent.learner_id == lid))).scalars().first()
         assert ev.payload["correct"] == False  # noqa: E712 — server truth wins
     # either way, the award is small (5 if truly first-correct else 1):
-    assert body["xp_awarded"] in (1, 5)
+    assert body["xp_awarded"] == 1  # effort only: server says it was wrong
     xp_after_q = body["xp_awarded"]
 
     # a step event: exactly +2

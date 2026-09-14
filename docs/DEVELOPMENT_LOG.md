@@ -262,3 +262,41 @@ revocation being rolled back by the request session on error responses
 (own-session commit); CORS env parsing (JSON vs comma-separated); the
 `_HttpClientSend` backlink silently dropped by a `.call` tear-off, so
 authenticated DELETEs went out bearerless (live contract test caught it).
+
+## Phase 3 — real curriculum, adaptive loop, full learner flow over HTTP
+
+Backend: `app/curriculum.py` (pure scope-&-sequence builder) → seeded
+**9 modules / 51 lessons / 510 steps / 166 questions / 48 patterns / 208
+words**, `origin='seed:curriculum-v1'`, snapshotted in `content_versions`;
+migration `7edb3ae4debd` adds `lessons.code` (stable curriculum id).
+Question engine returns per-answer verdicts (server-graded, reveal-after-
+answer); `GET /learners/{id}/mastery` (attempts/correct/**errors**/mastery/
+Leitner box/due) and `GET /learners/{id}/recommendation` (placement floor →
+consolidate-if-weak → next-in-sequence → due reviews) implement the adaptive
+foundation; placement grew to 16 server-scored items whose band sets
+`reading_level_key` and shifts the starting module.
+
+Client: live curriculum maps into the existing LessonRunner/domain (lesson
+ids = stable codes; uuids for sessions), remote-graded answers with the
+server reveal, server-authoritative stars on completion, Continue card driven
+by `/recommendation`, `AssessmentRemote` (server questions, server banding),
+`SyncProfileRepository` (local-first + `POST /learners` + durable pending
+queue + mirror binding), mirror skips lesson finishes for remote-managed
+lessons. Mock mode untouched; the static program remains the offline fallback.
+
+**Verified:** pytest 51/51 (10 new Phase-3 tests: coverage incl. a–z,
+answer-key leak scans, verdict flow, replay idempotency, mastery/error math,
+recommendation sequence incl. consolidate + placement floor, persistence);
+flutter analyze 0 issues; 157 client tests + 1 skipped; **live contract test
+over real sockets** (register→login→learner→curriculum→recommend letter-s→
+10-step lesson→server-graded question→complete→mastery rows→recommend
+letter-a→16-item placement through the app's own adapter→band sets level);
+raw SQL verification that progress actually persisted (session completed,
+ledger XP, learner xp=25 + pointer advanced, streak, mastery box, daily task,
+achievement); web release build ok.
+
+Defects the tests caught: client crashed on real assessment payloads (missing
+`position` fields — API extended, client tolerant); `substring(0,8)` dedupe
+id RangeError on short ids; provider reads in onDispose during teardown
+(Bad state — captured at build); runner `copyWith` silently dropping the
+reveal map (tests found the key never highlighted).

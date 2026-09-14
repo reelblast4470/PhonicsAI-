@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../progress/application/progress_providers.dart';
 import '../../progress/domain/progress_repository.dart';
+import '../data/live_lesson_service.dart';
 import '../domain/lesson.dart';
 import 'curriculum_providers.dart';
 
@@ -28,6 +29,7 @@ class LessonRunState {
     this.savedStars,
     this.buildAttempts = const {},
     this.errorMessage,
+    this.revealedCorrectIndex = const {},
   });
 
   final PhonicsLesson lesson;
@@ -44,6 +46,10 @@ class LessonRunState {
   final int? savedStars;
   final Map<String, List<String>> buildAttempts;
   final String? errorMessage;
+
+  /// itemId -> the correct option index, revealed by the SERVER after the
+  /// answer was graded (remote-graded items have no local `correctIndex`).
+  final Map<String, int> revealedCorrectIndex;
 
   LessonStage get stage => lesson.stages[stageIndex];
   bool get isLastStage => stageIndex == lesson.stageCount - 1;
@@ -83,6 +89,7 @@ class LessonRunState {
     int? savedStars,
     Map<String, List<String>>? buildAttempts,
     String? errorMessage,
+    Map<String, int>? revealedCorrectIndex,
   }) {
     return LessonRunState(
       lesson: lesson,
@@ -95,7 +102,9 @@ class LessonRunState {
       savedStars: savedStars ?? this.savedStars,
       buildAttempts: buildAttempts ?? this.buildAttempts,
       errorMessage: errorMessage,
-    );
+    
+      revealedCorrectIndex:
+          revealedCorrectIndex ?? this.revealedCorrectIndex,);
   }
 }
 
@@ -112,12 +121,27 @@ class LessonRunner extends FamilyNotifier<LessonRunState?, String> {
       ref.read(progressRepositoryProvider);
   String? get _profileId => ref.read(activeProfileIdProvider);
 
+  /// Server-backed grading + sessions (Phase 3). Null in mock mode, so every
+  /// existing test and offline path is untouched.
+  LiveLessonService? get _live => ref.read(liveLessonServiceProvider);
+  bool get _remoteRun =>
+      _live != null && state?.lesson.remoteId != null && _live!.enabled;
+
   @override
   LessonRunState? build(String argument) {
     lessonId = argument;
     _completionPersisted = false;
     final lesson = ref.read(lessonByIdProvider)[lessonId];
     if (lesson == null) return null;
+    final live = _live;
+    if (lesson.remoteId != null && live?.enabled == true) {
+      // Open the server-side learning session in the background; every live
+      // call below degrades to local behaviour if it never lands.
+      unawaited(live!.sessionFor(lessonId, lesson.remoteId!));
+      // Capture the instance: providers are unreadable once the container
+      // tears down mid-run (child closed the app, route popped, …).
+      ref.onDispose(() => unawaited(live.abandon(lessonId)));
+    }
     return LessonRunState(
       lesson: lesson,
       stageIndex: 0,
@@ -130,10 +154,48 @@ class LessonRunner extends FamilyNotifier<LessonRunState?, String> {
     final current = state;
     if (current == null || current.isStageClosing) return;
     final item = current.stage.items.firstWhere((i) => i.id == itemId);
-    final isCorrect = item.correctIndex == optionIndex;
+
+    // ---- live path: the server holds the answer key and returns the verdict
+    bool isCorrect;
+    Map<String, int>? revealed;
+    if (item.remoteQuestionId != null && _remoteRun) {
+      final answerId = optionIndex < item.optionIds.length
+          ? item.optionIds[optionIndex]
+          : null;
+      if (answerId == null) return;
+      final verdict = await _live!.grade(
+        lessonCode: lessonId,
+        questionId: item.remoteQuestionId!,
+        answerId: answerId,
+        phoneme: _phonemeForItem(item),
+      );
+      if (verdict == null) {
+        if (item.correctIndex == null) {
+          // Remote question but server unreachable: leave the item unanswered
+          // (we refuse to fake a grade) and let the stage advance by hand.
+          state = current.copyWith(
+            errorMessage:
+                'Grading is offline — this answer will count when we are '
+                'back online.',
+          );
+          return;
+        }
+        isCorrect = item.correctIndex == optionIndex;
+      } else {
+        isCorrect = verdict.correct;
+        final correctId = verdict.correctAnswerId;
+        if (correctId != null) {
+          final idx = item.optionIds.indexOf(correctId);
+          if (idx >= 0) revealed = {itemId: idx};
+        }
+      }
+    } else {
+      isCorrect = item.correctIndex == optionIndex;
+    }
+
     final outcomes = {...current.outcomes, itemId: isCorrect ? ItemOutcome.correct : ItemOutcome.wrong};
 
-    state = current.copyWith(outcomes: outcomes);
+    state = current.copyWith(outcomes: outcomes, revealedCorrectIndex: revealed);
     final profileId = _profileId;
     if (profileId != null) {
       unawaited(
@@ -213,6 +275,13 @@ class LessonRunner extends FamilyNotifier<LessonRunState?, String> {
         ),
       );
     }
+    if (_remoteRun) {
+      unawaited(_live!.markStep(
+        lessonCode: lessonId,
+        position: current.stageIndex + 1,
+        stepType: current.stage.kind.name,
+      ));
+    }
 
     if (current.isLastStage) {
       await finish();
@@ -242,6 +311,26 @@ class LessonRunner extends FamilyNotifier<LessonRunState?, String> {
       return;
     }
     final seconds = DateTime.now().difference(current.startedAt).inSeconds;
+
+    // Live mode: the server is the authority on the recorded completion
+    // (XP, stars, mastery, pointer advance, next recommendation). Local
+    // progress below still runs first so the UI is never blocked on the net.
+    int? serverStars;
+    if (_remoteRun) {
+      final server = await _live!.complete(
+        lessonCode: lessonId,
+        stars: current.stars,
+        accuracy: current.accuracy,
+        secondsSpent: seconds,
+        phonemes: current.lesson.phonemes,
+      );
+      if (server != null) {
+        serverStars = server.stars;
+        state = state!.copyWith(savedStars: server.stars);
+        ref.invalidate(liveRecommendationProvider);
+      }
+    }
+
     final result = await _progress.finishLesson(
       profileId: profileId,
       lessonId: lessonId,
@@ -255,7 +344,7 @@ class LessonRunner extends FamilyNotifier<LessonRunState?, String> {
       ok: (_) => current.copyWith(
         isFinished: true,
         isSaving: false,
-        savedStars: current.stars,
+        savedStars: serverStars ?? current.stars,
       ),
       fail: (failure) => current.copyWith(
         isFinished: true,

@@ -216,6 +216,16 @@ class HomeScreen extends ConsumerWidget {
   PhonicsLesson? _nextLesson(WidgetRef ref, ProfileSnapshot? snapshot) {
     final ordered = ref.watch(orderedLessonsProvider);
     if (ordered.isEmpty) return null;
+    // Live mode (Phase 3): the server engine owns "what's next" —
+    // consolidate/review/advance rules all run there. Fall back to the local
+    // rule when offline or in mock mode.
+    final rec = ref.watch(liveRecommendationProvider).valueOrNull;
+    final code = rec?.lessonCode;
+    if (code != null) {
+      for (final lesson in ordered) {
+        if (lesson.id == code) return lesson;
+      }
+    }
     if (snapshot == null) return ordered.first;
     return snapshot.nextLesson(ordered);
   }

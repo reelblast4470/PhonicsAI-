@@ -3,17 +3,35 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../app/di/infrastructure.dart';
 import '../../../app/state/app_settings_controller.dart';
 import '../../../core/domain/learner_profile.dart';
+import '../../../core/env/app_config.dart';
 import '../../../core/error/failure.dart';
+import '../../progress/application/progress_providers.dart';
 import '../data/local_profile_repository.dart';
+import '../data/sync_profile_repository.dart';
 import '../domain/profile_repository.dart';
 
-/// Swap this one line for `RemoteProfileRepository(...)` (or a
-/// `CachedProfileRepository` in front of both) when the accounts API lands.
+/// Mock mode: device-only. Live/offline-first (Phase 3): the same local
+/// repository plus a best-effort mirror to `POST /learners` (with a durable
+/// pending queue) and the binding that arms the progress mirror.
 final profileRepositoryProvider = Provider<ProfileRepository>((ref) {
-  final repository = LocalProfileRepository(
+  final local = LocalProfileRepository(
     store: ref.watch(keyValueStoreProvider),
   );
-  ref.onDispose(repository.dispose);
+  final config = ref.watch(appConfigProvider);
+  if (config.backendMode == BackendMode.mock || !config.hasBackend) {
+    ref.onDispose(local.dispose);
+    return local;
+  }
+  final repository = SyncProfileRepository(
+    local: local,
+    api: ref.watch(apiClientProvider),
+    store: ref.watch(keyValueStoreProvider),
+    sync: ref.watch(backendProgressSyncProvider),
+  );
+  ref.onDispose(() async {
+    await repository.dispose();
+    await local.dispose();
+  });
   return repository;
 });
 

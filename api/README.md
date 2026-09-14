@@ -129,12 +129,43 @@ Goal: an RPO of 24 h with plain dumps, ~5 min with WAL archiving; RTO < 1 h.
    encryption per bucket + expiry policies. The analytics ledger stores only
    whitelisted event keys with UUID references — no free text from children.
 
+## Phase 3 — real curriculum & the adaptive loop
+
+* `app/curriculum.py` is the content pipeline: one pure, deterministic
+  module → the seeded DB rows (currently **9 modules / 51 lessons / 510 steps
+  / 166 questions / 48 phonics patterns / 208 words**; every letter a–z,
+  short-vowel word families, blending, segmenting, sh-ch-th-wh-ph, consonant
+  blends). It is stamped `origin='seed:curriculum-v1'` and snapshotted into
+  `content_versions` (the `/content/curriculum` payload carries that version
+  so the client can cache-bust). A CMS later replaces this module; the schema
+  and API do not change.
+* `GET /api/v1/content/curriculum` — one-shot full tree (steps + questions,
+  never the answer key) that backs the Flutter curriculum cache.
+* Question engine: `POST …/events` with `question_answered` decides
+  correctness from the DB, and now returns a verdict
+  (`correct, correct_answer_id, correct_text, explanation, chosen_feedback`)
+  that the runner uses for the reveal; XP stays engine-derived and
+  `client_event_id` replay-safe.
+* Mastery & errors: `GET /learners/{id}/mastery` exposes the
+  `learner_skill_progress` rows (attempts, correct, **error_count**, mastery
+  0..1, Leitner box, due date) updated by every graded event.
+* Adaptive foundation: `GET /learners/{id}/recommendation` implements the
+  deterministic rule (placement floor → consolidate-if-accuracy<0.6 → next in
+  sequence → due spaced reviews attached); the client Continue card honors it.
+* Placement: `placement-english-v2` is now 16 items across five skills; the
+  server bands it into `reading_level_key`, which feeds the recommendation
+  floor above.
+* Client live mode: the Learn flow opens a real session, grades through the
+  server, completes authoritatively (stars from the API response), and the
+  durable mirror skips lesson finishes for remote-managed lessons (no double
+  counting). Profiles created in live/offline-first mode POST to
+  `/learners` with an offline pending queue and arm the mirror binding.
+
 ## Notes / limits of this foundation
 
-* Content ids: the seeded lessons carry UUIDs assigned at seed time; the
-  Flutter→backend progress mirror queues lesson finishes until a Phase-3
-  content pipeline supplies the mapping (`bindLesson`). Games/reading/reviews
-  already flow live (see `test/live/live_backend_contract_test.dart`).
+* Production content: the curriculum module is real teaching data but still
+  seeded, not CMS-authored; audio rows are placeholder paths until the media
+  pipeline fills them.
 * Subscription receipts from stores are recorded but *unverified* until a
   server-side receipt check is wired; entitlements flip only via admin grants
   or verified receipts (`commerce.py`).

@@ -327,3 +327,145 @@ async def check_achievements(db: AsyncSession, learner: LearnerProfile) -> list[
             db.add(LearnerAchievement(learner_id=learner.id, achievement_id=ach.id))
             new_keys.append(ach.key)
     return new_keys
+
+
+# ---------------------------------------------------------------------------
+# Adaptive difficulty foundation (Phase 3) — deterministic rules, no randomness
+# ---------------------------------------------------------------------------
+
+REPEAT_ACCURACY = 0.6   # below this, the same lesson repeats (consolidation)
+PASS_ACCURACY = 0.6     # at or above, advance to the next lesson in sequence
+
+
+async def lesson_completion_stats(
+    db: AsyncSession, learner_id: UUID, lesson_id: UUID
+) -> tuple[int, float, int]:
+    """(times_completed, best_accuracy, best_stars) from real session rows."""
+    rows = list(await db.execute(
+        select(LearningSession.accuracy, LearningSession.stars).where(
+            LearningSession.learner_id == learner_id,
+            LearningSession.kind == "lesson",
+            LearningSession.status == "completed",
+            LearningSession.ref_id == lesson_id,
+        )
+    ))
+    if not rows:
+        return 0, 0.0, 0
+    accs = [float(a) for a, _ in rows if a is not None]
+    stars = [int(s) for _, s in rows if s is not None]
+    return len(rows), (max(accs) if accs else 0.0), (max(stars) if stars else 0)
+
+
+async def ordered_published_lessons(db: AsyncSession) -> list[Lesson]:
+    rows = list(await db.execute(
+        select(Lesson).join(Module, Lesson.module_id == Module.id)
+        .join(Course, Module.course_id == Course.id)
+        .where(Course.status == "published")
+        .order_by(Module.position, Lesson.position)
+    ))
+    return [r[0] for r in rows]
+
+
+async def due_reviews(db: AsyncSession, learner_id: UUID, on: date,
+                      limit: int = 3) -> list[LearnerSkillProgress]:
+    rows = list(await db.scalars(
+        select(LearnerSkillProgress)
+        .where(
+            LearnerSkillProgress.learner_id == learner_id,
+            LearnerSkillProgress.due_on.is_not(None),
+            LearnerSkillProgress.due_on <= on,
+            LearnerSkillProgress.srs_box < 4,
+        )
+        .order_by(LearnerSkillProgress.due_on, LearnerSkillProgress.mastery)
+        .limit(limit)
+    ))
+    return rows
+
+
+# Where a placed learner starts, given the assessment band (module floors into
+# the seeded ordering). A child who already knows letter sounds does not sit
+# through 27 letter lessons; a pre-reader starts at zero, always.
+START_BY_BAND = {
+    "pre-reader": 1, "emerging": 1,
+    "beginning": 6,      # straight into word families
+    "progressing": 7,    # blending/segmenting skills
+    "proficient": 8,     # digraphs
+    "fluent": 8,
+}
+
+
+async def next_best_lesson(db: AsyncSession, learner: LearnerProfile,
+                           on: date | None = None) -> dict:
+    """The recommendation rule, in one explainable place:
+
+    0. A brand-new learner starts at the module their placement band maps to
+       (START_BY_BAND); placement never skips consolidation later on.
+    1. A lesson that was attempted but not passed (accuracy < 0.6) repeats —
+       consolidation before progression.
+    2. Otherwise: the first lesson in curriculum order that is not yet
+       completed.
+    3. Due spaced reviews are always attached to the recommendation so the
+       daily loop interleaves them; if nothing else remains, the payload flips
+       to type='review'.
+    Deterministic: same learner state → same recommendation, everywhere.
+    """
+    today = on or datetime.now(timezone.utc).date()
+    lessons = await ordered_published_lessons(db)
+    completed_ids = set(await db.scalars(
+        select(LearningSession.ref_id).where(
+            LearningSession.learner_id == learner.id,
+            LearningSession.kind == "lesson",
+            LearningSession.status == "completed",
+        )
+    ))
+    reviews = await due_reviews(db, learner.id, today)
+
+    candidate: Lesson | None = None
+    reason = "next in sequence"
+
+    # (1) repeat-if-not-passed: look at the most recent completed lesson
+    last = await db.scalar(
+        select(LearningSession).where(
+            LearningSession.learner_id == learner.id,
+            LearningSession.kind == "lesson",
+            LearningSession.status == "completed",
+        ).order_by(LearningSession.ended_at.desc()).limit(1)
+    )
+    if last is not None and last.ref_id is not None:
+        times, best_acc, best_stars = await lesson_completion_stats(
+            db, learner.id, last.ref_id)
+        if best_acc < REPEAT_ACCURACY or best_stars == 0:
+            lesson = await db.get(Lesson, last.ref_id)
+            if lesson is not None:
+                module = await db.get(Module, lesson.module_id)
+                return {
+                    "type": "lesson", "reason": "consolidate",
+                    "lesson": lesson, "module_title": module.title if module else None,
+                    "reviews": reviews,
+                }
+
+    # (0) placement floor for learners who have completed nothing yet
+    floor = 1
+    if not completed_ids and learner.reading_level_key:
+        floor = START_BY_BAND.get(learner.reading_level_key, 1)
+
+    # (2) first not-completed lesson
+    for lesson in lessons:
+        if lesson.module.position < floor:
+            continue
+        if lesson.id not in completed_ids:
+            module = await db.get(Module, lesson.module_id)
+            candidate, cand_reason = lesson, reason
+            candidate_module = module.title if module else None
+            break
+    if candidate is None:
+        # everything done → reviews only (or finished)
+        if reviews:
+            return {"type": "review", "reason": "spaced reviews due",
+                    "lesson": None, "module_title": None, "reviews": reviews}
+        return {"type": "complete", "reason": "course finished — await new content",
+                "lesson": None, "module_title": None, "reviews": []}
+
+    return {"type": "lesson", "reason": cand_reason if reviews else reason,
+            "lesson": candidate, "module_title": candidate_module,
+            "reviews": reviews}

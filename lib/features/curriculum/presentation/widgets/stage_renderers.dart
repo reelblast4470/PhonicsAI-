@@ -216,7 +216,10 @@ class _ChoicesState extends ConsumerState<_Choices> {
                     emoji: PhonicsProgram.emojiFor(items[i].options[choice]),
                     outcome: widget.state.outcomeOf(items[i].id),
                     isChosen: _isChosen(items[i].id, choice),
-                    isCorrectChoice: items[i].correctIndex == choice,
+                    isCorrectChoice:
+                        (widget.state.revealedCorrectIndex[items[i].id] ??
+                                items[i].correctIndex) ==
+                            choice,
                     onTap: () {
                       widget.runner
                           .answerChoice(items[i].id, choice)

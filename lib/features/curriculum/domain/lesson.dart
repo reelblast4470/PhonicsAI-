@@ -39,6 +39,8 @@ class StageItem {
     this.audioText,
     this.letters,
     this.targetWord,
+    this.remoteQuestionId,
+    this.optionIds = const [],
   });
 
   final String id;
@@ -56,6 +58,13 @@ class StageItem {
   /// Letter tiles for practice / spelling.
   final List<String>? letters;
   final String? targetWord;
+
+  /// Live-mode grading handles (Phase 3): when set, correctness is decided by
+  /// the server, not by `correctIndex`. `optionIds[i]` is the backend answer
+  /// id for `options[i]`. Mock/static content leaves these null.
+  final String? remoteQuestionId;
+  final List<String> optionIds;
+  bool get isRemoteGraded => remoteQuestionId != null;
 
   bool get isChoice => options.isNotEmpty && correctIndex != null;
   bool get isBuilder => letters != null && targetWord != null;
@@ -95,6 +104,7 @@ class PhonicsLesson {
     required this.stages,
     required this.phonemes,
     this.xp = 10,
+    this.remoteId,
   });
 
   final String id;
@@ -107,6 +117,11 @@ class PhonicsLesson {
   /// What this lesson teaches, used by progress + the tutor.
   final List<String> phonemes;
   final int xp;
+
+  /// Backend UUID of this lesson when it came from the curriculum API
+  /// (Phase 3). Null for bundled/static content — the lesson engine uses it
+  /// to open learning sessions against `/learners/{id}/sessions`.
+  final String? remoteId;
 
   int get stageCount => stages.length;
 }

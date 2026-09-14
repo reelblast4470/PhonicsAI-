@@ -142,6 +142,21 @@ class BackendProgressSync implements ProgressMirror {
     }
   }
 
+  /// Explicit binding from the profile layer (no name matching needed).
+  Future<void> bindProfile({
+    required String profileId,
+    required String learnerId,
+  }) => _setBinding(profileId, learnerId);
+
+  /// Lessons that the live lesson runner drives directly against the API
+  /// (Phase 3). Their finish events must NOT be re-queued by the mirror —
+  /// the server already recorded the completion once, authoritatively.
+  void registerRemoteLessons(Set<String> codes) {
+    _remoteLessons.addAll(codes);
+  }
+
+  final Set<String> _remoteLessons = <String>{};
+
   Future<void> bindLesson({
     required String localLessonId,
     required String backendLessonId,
@@ -244,13 +259,18 @@ class BackendProgressSync implements ProgressMirror {
     required int stars,
     required double accuracy,
     required double secondsSpent,
-  }) => _pushOrQueue(SyncOp(kind: 'lesson_finish', payload: {
+  }) async {
+    if (_remoteLessons.contains(lessonId)) {
+      return; // live runner already completed this lesson server-side
+    }
+    await _pushOrQueue(SyncOp(kind: 'lesson_finish', payload: {
     'profile': profileId,
     'lesson': lessonId,
     'stars': stars,
     'accuracy': accuracy,
     'seconds': secondsSpent.round(),
   }));
+  }
 
   /// Local game ids -> backend game ref_keys (the seeded dev catalog).
   static String _gameKeyFor(String gameId) {

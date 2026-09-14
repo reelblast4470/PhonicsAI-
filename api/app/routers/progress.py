@@ -6,7 +6,7 @@ Trust model: the client reports *attempts*, the server decides *correctness*
 cannot grant itself XP: payload["correct"] is overwritten from the database.
 """
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from uuid import UUID
 
 from fastapi import APIRouter
@@ -22,6 +22,7 @@ from ..models import (
     LearningEvent,
     LearningSession,
     Lesson,
+    Question,
     Streak,
 )
 from ..progress import (
@@ -30,11 +31,15 @@ from ..progress import (
     bump_streak,
     check_achievements,
     ensure_daily_tasks,
+    next_best_lesson,
     stars_for_lesson,
     xp_for_event,
 )
 from ..schemas import (
     DailyTaskOut,
+    MasteryRowOut,
+    RecommendationOut,
+    ReviewItemOut,
     EventIn,
     LessonCompleteIn,
     SessionOut,
@@ -103,7 +108,26 @@ async def add_event(learner_id: UUID, session_id: UUID, body: EventIn,
         dup = await db.scalar(select(LearningEvent).where(
             LearningEvent.client_event_id == body.client_event_id))
         if dup is not None:
-            return {"ok": True, "duplicate": True, "xp_awarded": dup.xp_delta}
+            return {"ok": True, "duplicate": True, "xp_awarded": dup.xp_delta,
+                    "correct": dup.payload.get("correct"),
+                    "correct_answer_id": dup.payload.get("correct_answer_id"),
+                    "explanation": dup.payload.get("explanation")}
+
+    verdict: dict = {}
+    if body.event_type == "question_answered":
+        question = await db.get(Question, question_uuid)
+        correct_row = await db.scalar(select(Answer).where(
+            Answer.question_id == question_uuid, Answer.is_correct.is_(True)))
+        chosen = await db.get(Answer, answer_uuid)
+        payload["correct_answer_id"] = str(correct_row.id) if correct_row else None
+        verdict = {
+            "correct": bool(payload.get("correct")),
+            "correct_answer_id": payload["correct_answer_id"],
+            "correct_text": correct_row.text if correct_row else None,
+            "explanation": (question.explanation if question else None),
+            "chosen_feedback": None if payload.get("correct") else (
+                chosen.feedback if chosen else None),
+        }
 
     xp = xp_for_event(body.event_type, payload)
     event = LearningEvent(learner_id=learner.id, session_id=session.id,
@@ -154,7 +178,7 @@ async def add_event(learner_id: UUID, session_id: UUID, body: EventIn,
     await db.flush()
     return {"ok": True, "xp_awarded": xp,
             "daily_tasks_completed": [t.task_key for t in completed],
-            "achievements_earned": new_badges}
+            "achievements_earned": new_badges, **verdict}
 
 
 @router.post("/sessions/{session_id}/complete")
@@ -272,3 +296,40 @@ async def daily_tasks(learner_id: UUID, actor: ActorDep, db: DbSession) -> list[
                          target_count=t.target_count, progress_count=t.progress_count,
                          reward_xp=t.reward_xp, completed=t.completed_at is not None)
             for t in tasks]
+
+
+@router.get("/mastery", response_model=list[MasteryRowOut])
+async def mastery(learner_id: UUID, actor: ActorDep, db: DbSession) -> list[MasteryRowOut]:
+    """Per-subject mastery rows — attempts, correct, error_count, box, due day.
+    This is what feeds parent dashboards and (later) the adaptive model."""
+    learner = await learner_for_actor(db, learner_id, actor)
+    rows = list(await db.scalars(
+        select(LearnerSkillProgress)
+        .where(LearnerSkillProgress.learner_id == learner.id)
+        .order_by(LearnerSkillProgress.mastery, LearnerSkillProgress.subject_key)
+    ))
+    return [MasteryRowOut(
+        subject_key=r.subject_key, skill_key=r.skill_key, attempts=r.attempts,
+        correct=r.correct, error_count=r.attempts - r.correct,
+        mastery=round(r.mastery, 4), srs_box=r.srs_box, due_on=r.due_on,
+    ) for r in rows]
+
+
+@router.get("/recommendation", response_model=RecommendationOut)
+async def recommendation(learner_id: UUID, actor: ActorDep, db: DbSession) -> RecommendationOut:
+    """Deterministic adaptive rule (see app/progress.next_best_lesson):
+    consolidate-if-weak, else next in sequence, with due spaced reviews
+    attached. Not random, not client-influenced."""
+    learner = await learner_for_actor(db, learner_id, actor)
+    rec = await next_best_lesson(db, learner, datetime.now(timezone.utc).date())
+    lesson = rec["lesson"]
+    return RecommendationOut(
+        type=rec["type"], reason=rec["reason"], learner_id=learner.id,
+        lesson_id=lesson.id if lesson else None,
+        lesson_code=lesson.code if lesson else None,
+        lesson_title=lesson.title if lesson else None,
+        module_title=rec["module_title"],
+        reviews=[ReviewItemOut(subject_key=r.subject_key, srs_box=r.srs_box,
+                               mastery=round(r.mastery, 4), due_on=r.due_on)
+                 for r in rec["reviews"]],
+    )

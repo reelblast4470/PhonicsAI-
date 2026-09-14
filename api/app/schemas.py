@@ -159,6 +159,7 @@ class StepOut(BaseModel):
 
 class LessonOut(BaseModel):
     id: UUID
+    code: str | None = None
     title: str
     summary: str | None
     position: int
@@ -178,6 +179,7 @@ class ModuleOut(BaseModel):
 class CourseOut(BaseModel):
     id: UUID
     slug: str
+    version: str | None = None
     title: str
     description: str | None
     origin: str
@@ -274,6 +276,7 @@ class AssessmentSubmitIn(Strict):
 
 
 class AssessmentResultOut(BaseModel):
+    per_question: list[dict] = Field(default_factory=list)
     id: UUID
     score: int
     score_max: int
@@ -365,3 +368,36 @@ class NotificationOut(BaseModel):
     body: str | None
     read_at: datetime | None
     created_at: datetime
+
+
+class MasteryRowOut(BaseModel):
+    subject_key: str
+    skill_key: str
+    attempts: int
+    correct: int
+    error_count: int
+    mastery: float
+    srs_box: int
+    due_on: date | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ReviewItemOut(BaseModel):
+    subject_key: str
+    srs_box: int
+    mastery: float
+    due_on: date | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class RecommendationOut(BaseModel):
+    type: str  # lesson | review | complete
+    reason: str
+    learner_id: UUID
+    lesson_id: UUID | None = None
+    lesson_code: str | None = None
+    lesson_title: str | None = None
+    module_title: str | None = None
+    reviews: list[ReviewItemOut] = Field(default_factory=list)

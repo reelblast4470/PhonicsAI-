@@ -18,6 +18,7 @@ import 'package:phonicsai/core/network/api_client.dart';
 import 'package:phonicsai/core/network/session_token_holder.dart';
 import 'package:phonicsai/core/storage/in_memory_secure_vault.dart';
 import 'package:phonicsai/core/storage/key_value_store.dart';
+import 'package:phonicsai/features/assessment/data/assessment_remote.dart';
 import 'package:phonicsai/features/auth/data/http_auth_repository.dart';
 import 'package:phonicsai/features/progress/data/backend_progress_sync.dart';
 
@@ -117,6 +118,74 @@ void main() {
 
     final tasks = await api.getListJson('/learners/$learnerId/daily-tasks');
     expect(tasks.any((t) => t['completed'] == true), isTrue);
+
+    // ---- Phase 3: real curriculum straight from the database ----
+    final curriculum = await api.getJson('/content/curriculum');
+    expect(curriculum['version'], isNotNull); // content_versions stamp
+    final lessons = [
+      for (final m in curriculum['courses'][0]['modules'] as List)
+        for (final l in m['lessons'] as List) l as Map<String, dynamic>,
+    ];
+    expect(lessons.length, greaterThanOrEqualTo(50));
+
+    // recommendation engine picks the first lesson for a fresh learner
+    var rec = await api.getJson('/learners/$learnerId/recommendation');
+    expect(rec['type'], 'lesson');
+    expect(rec['lesson_code'], 'letter-s');
+    final lessonUuid = rec['lesson_id'].toString();
+
+    // open a REAL lesson (10 steps), answer a question, get the server verdict
+    final lesson = await api.getJson('/content/lessons/$lessonUuid');
+    expect((lesson['steps'] as List), hasLength(10));
+    final lessonSid = (await api.postJson('/learners/$learnerId/sessions',
+        body: {'kind': 'lesson', 'ref_id': lessonUuid}))['id'];
+    final hearStep = (lesson['steps'] as List)
+        .cast<Map<String, dynamic>>()
+        .firstWhere((st) => st['step_type'] == 'hear');
+    final q = (hearStep['questions'] as List).first as Map<String, dynamic>;
+    final verdict = await api.postJson(
+      '/learners/$learnerId/sessions/$lessonSid/events',
+      body: {
+        'event_type': 'question_answered',
+        'payload': {
+          'question_id': q['id'],
+          'answer_id': (q['answers'] as List).first['id'],
+          'phoneme': 's',
+        },
+      },
+    );
+    expect(verdict['correct'], isA<bool>()); // server decides
+    if (verdict['correct'] == false) {
+      expect(verdict['correct_answer_id'], isNotNull); // reveal after grading
+    }
+    final done = await api.postJson(
+      '/learners/$learnerId/sessions/$lessonSid/complete',
+      body: {
+        'stars': 3,
+        'accuracy': 0.95,
+        'seconds_spent': 140,
+        'phonemes': ['s'],
+      },
+    );
+    expect(done['ok'], true);
+
+    // mastery persisted server-side; recommendation advanced deterministically
+    final mastery = await api.getListJson('/learners/$learnerId/mastery');
+    expect(mastery.any((r) => r['subject_key'] == 's'), isTrue);
+    rec = await api.getJson('/learners/$learnerId/recommendation');
+    expect(rec['lesson_code'], 'letter-a');
+
+    // placement through the app's OWN adapter: 16 server items, server band
+    final remote = await AssessmentRemote.tryStart(
+      api: api,
+      learnerId: learnerId,
+    );
+    expect(remote, isNotNull);
+    expect(remote!.questions, hasLength(16));
+    final submitted = await remote.submit(List<int?>.filled(16, 0));
+    expect(submitted.isOk, isTrue);
+    final learnerAfter = await api.getJson('/learners/$learnerId');
+    expect(learnerAfter['reading_level_key'], isNotNull);
 
     // wrong password fails cleanly through the auth adapter
     final bad = await auth.signIn(email: email, password: 'nope-nope-nope');

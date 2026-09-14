@@ -333,6 +333,7 @@ class Lesson(TimestampMixin, Base):
     module_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("modules.id", ondelete="CASCADE"), index=True, nullable=False
     )
+    code: Mapped[str | None] = mapped_column(String(60), unique=True)  # stable curriculum id
     title: Mapped[str] = mapped_column(String(160), nullable=False)
     summary: Mapped[str | None] = mapped_column(Text)
     position: Mapped[int] = mapped_column(Integer, nullable=False)

@@ -182,8 +182,11 @@ class _QuestionStepState extends ConsumerState<_QuestionStep> {
                     _OptionTile(
                       option: question.options[i],
                       isChosen: chosen == i,
-                      isCorrect: revealed && i == question.correctIndex,
+                      isCorrect: revealed &&
+                          question.correctIndex >= 0 &&
+                          i == question.correctIndex,
                       isWrongChoice: revealed &&
+                          question.correctIndex >= 0 &&
                           chosen == i &&
                           i != question.correctIndex,
                       onTap: revealed ? null : () => controller.answer(i),
@@ -199,7 +202,9 @@ class _QuestionStepState extends ConsumerState<_QuestionStep> {
                       child: Column(
                         children: [
                           Text(
-                            chosen == question.correctIndex
+                            question.correctIndex < 0
+                                ? 'Got it — next one!'
+                                : chosen == question.correctIndex
                                 ? 'Yes! ${question.options[chosen].word}'
                                 : question.hintForWrong ??
                                     'Listen again and try one more.',
@@ -221,7 +226,8 @@ class _QuestionStepState extends ConsumerState<_QuestionStep> {
                                 : Icons.arrow_forward_rounded,
                             isExpanded: true,
                             onPressed: () async {
-                              if (chosen == question.correctIndex) {
+                              if (question.correctIndex < 0 ||
+                                  chosen == question.correctIndex) {
                                 setState(() => _burst++);
                               }
                               if (state.isOnLastQuestion) {

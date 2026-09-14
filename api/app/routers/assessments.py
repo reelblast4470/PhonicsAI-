@@ -48,7 +48,9 @@ async def start(assessment_key: str, learner_id: UUID, actor: ActorDep, db: DbSe
             Answer.question_id == q.id).order_by(Answer.position)))
         questions.append({
             "id": str(q.id), "prompt": q.prompt, "kind": q.kind,
-            "answers": [{"id": str(a.id), "text": a.text} for a in answers],
+            "position": q.position,
+            "answers": [{"id": str(a.id), "text": a.text,
+                         "position": a.position} for a in answers],
         })
     return AssessmentStartOut(result_id=result.id, assessment_key=assessment_key,
                               questions=questions)
@@ -103,4 +105,5 @@ async def submit(result_id: UUID, learner_id: UUID, body: AssessmentSubmitIn,
                             "score_max": score_max, "band": band})
     await db.flush()
     return AssessmentResultOut(id=result.id, score=score, score_max=score_max,
-                               band_key=band, completed_at=result.completed_at)
+                               band_key=band, completed_at=result.completed_at,
+                               per_question=per_question)

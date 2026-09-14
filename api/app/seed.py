@@ -1,20 +1,24 @@
-"""Idempotent seeding of reference + demo content.
+"""Idempotent seeding: reference rows + the Phase-3 curriculum dump.
 
-Run via `python -m app.seed` (or app startup with SEED_ON_BOOT=1 in dev).
-Every seeded course/assessment is tagged so nothing here can be mistaken for
-production content.
+Run via `python -m app.seed`. Reference data (levels, languages, skills,
+badges, achievements) and the curriculum are separate passes; both are
+idempotent. Curriculum rows carry `origin='curriculum-v1'` and a
+`content_versions` snapshot so seeded content can never be mistaken for
+hand-authored production content.
 """
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import random
 import uuid as uuidlib
-from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .curriculum import ASSESSMENT, EMOJI, BANDS, WORDS, build_all, word_text
 from .db import get_session_factory
 from .models import (
     Achievement,
@@ -22,6 +26,7 @@ from .models import (
     Answer,
     Assessment,
     Badge,
+    ContentVersion,
     Course,
     Language,
     Lesson,
@@ -37,17 +42,13 @@ from .models import (
 from .security import hash_password
 from .seed_data import (
     ACHIEVEMENTS,
-    ASSESSMENT_ITEMS,
     BADGES,
     LANGUAGES,
     LEVELS,
     SKILLS,
-    UNITS,
 )
 
 log = logging.getLogger("phonicsai.seed")
-STEP_CYCLE = ["discover", "hear", "see", "understand", "practice",
-              "play", "recall", "speak", "read", "review"]
 
 
 async def _get_or_create(db: AsyncSession, model, defaults=None, **filters):
@@ -66,6 +67,7 @@ async def _get_or_create(db: AsyncSession, model, defaults=None, **filters):
 async def seed_all(db: AsyncSession, *, include_admin: bool = True) -> dict:
     made: dict = {}
 
+    # ---------------- reference data --------------------------------------
     for code, name, rtl in LANGUAGES:
         await _get_or_create(db, Language, {"english_name": name, "is_rtl": rtl}, code=code)
     for key, label, idx, lo, hi in LEVELS:
@@ -74,133 +76,131 @@ async def seed_all(db: AsyncSession, *, include_admin: bool = True) -> dict:
     for key, label in SKILLS:
         await _get_or_create(db, Skill, {"label": label}, key=key)
 
-    patterns: dict[tuple[str, str], PhonicsPattern] = {}
-    words: dict[str, Word] = {}
-    rank = 0
-    for unit_idx, (unit_title, unit_patterns) in enumerate(UNITS):
-        for grapheme, phoneme, word_list in unit_patterns:
-            rank += 1
-            pat, _ = await _get_or_create(
-                db, PhonicsPattern,
-                {"difficulty_rank": unit_idx * 10 + rank},
-                grapheme=grapheme, phoneme=phoneme,
-            )
-            patterns[(grapheme, phoneme)] = pat
-            for w in word_list:
-                word, fresh = await _get_or_create(
-                    db, Word,
-                    {"syllable_count": 1,
-                     "pattern_ids": [str(x) for x in patterns]},  # replaced below
-                    text=w,
-                )
-                word.pattern_ids = [str(pat.id)]
-                word.picture_key = w
-                word.audio_ref = f"audio/words/{w}.mp3"  # placeholder path; media pipeline fills it
-                words[w] = word
-    await db.flush()
+    # ---------------- phonics patterns + word bank -------------------------
+    from .curriculum import all_patterns
 
+    pattern_id: dict[str, uuidlib.UUID] = {}
+    for grapheme, phoneme, rank in all_patterns():
+        pat, _ = await _get_or_create(
+            db, PhonicsPattern, {"phoneme": phoneme, "difficulty_rank": rank},
+            grapheme=grapheme,
+        )
+        pattern_id[grapheme] = pat.id
+    word_row: dict[str, Word] = {}
+    for key, decomp in sorted(WORDS.items()):
+        text = word_text(key)
+        w, _ = await _get_or_create(
+            db, Word,
+            {"syllable_count": 1,
+             "picture_key": text,
+             "audio_ref": f"audio/words/{text}.mp3",  # placeholder until the media pipeline fills it
+             "pattern_ids": [str(pattern_id[g]) for g in decomp if g in pattern_id]},
+            text=text,
+        )
+        word_row[text] = w
+
+    # ---------------- the curriculum tree ----------------------------------
+    dump = build_all()
     course, fresh_course = await _get_or_create(
         db, Course,
-        {"title": "Phonics Foundations (SEED)",
-         "description": "Sequenced starter program — satsin style. DEV SEED CONTENT.",
-         "status": "published", "origin": "seed-dev"},
-        slug="phonics-foundations",
+        {"title": dump["title"], "description": dump["description"],
+         "status": "published", "origin": dump["origin"]},
+        slug=dump["slug"],
     )
     made["course"] = str(course.id)
+    made["version"] = dump["version"]
+
     if fresh_course:
-        all_word_texts = sorted(words)
-        for unit_idx, (unit_title, unit_patterns) in enumerate(UNITS):
+        for m in dump["modules"]:
             module, _ = await _get_or_create(
-                db, Module, {"position": unit_idx + 1},
-                course_id=course.id, title=unit_title,
+                db, Module, {"position": m["position"]},
+                course_id=course.id, title=m["title"],
             )
-            unit_words = [w for _, _, wl in unit_patterns for w in wl]
-            for lesson_idx in (0, 1):  # intro + blending per unit
-                focus = unit_patterns[lesson_idx % len(unit_patterns)][0]
-                lesson, fresh_l = await _get_or_create(
-                    db, Lesson,
-                    {"title": f"{unit_title.split(':')[1].strip()} — "
-                             f"{'meet the sounds' if lesson_idx == 0 else 'blend and read'}",
-                     "summary": "Seeded lesson exercising the full 10-stage loop.",
-                     "position": lesson_idx + 1, "est_seconds": 240, "xp_reward": 20},
-                    module_id=module.id, position=lesson_idx + 1,
+            for l in m["lessons"]:
+                pattern = None
+                first_grapheme = l["title"]  # patterns linked via summary focus
+                focus = l["summary"].split(":")[1].split("(")[0].strip() if ":" in l["summary"] else ""
+                first = focus.split(",")[0].strip().strip("“”\"'") if focus else ""
+                if first in pattern_id:
+                    pattern = pattern_id[first]
+                lesson = Lesson(
+                    module_id=module.id, code=l["code"], title=l["title"],
+                    summary=l["summary"], position=l["position"],
+                    est_seconds=l["est_seconds"], xp_reward=l["xp_reward"],
+                    pattern_id=pattern,
                 )
-                if not fresh_l:
-                    continue
-                g, ph, wl = unit_patterns[min(lesson_idx, len(unit_patterns) - 1)]
-                for pos, stype in enumerate(STEP_CYCLE, start=1):
-                    payload = {
-                        "discover": {"prompt": f"Today we chase the {g} sound",
-                                     "picture": words[wl[0]].picture_key},
-                        "hear": {"tts": ph.strip("/"), "word": wl[0]},
-                        "see": {"grapheme": g, "word": wl[0], "highlight": g},
-                        "understand": {"tip": f"{g} makes the {ph} sound, like in {wl[0]}"},
-                        "speak": {"target": wl[0]},
-                        "read": {"sentence": _sentence(g, wl, all_word_texts)},
-                        "review": {"phoneme": ph.strip("/"), "grapheme": g},
-                        "play": {"game": "sound-match", "params": {"phoneme": ph.strip("/")}},
-                    }.get(stype, {})
-                    step = LessonStep(lesson_id=lesson.id, step_type=stype,
-                                       position=pos, payload=payload)
-                    db.add(step)
+                db.add(lesson)
+                await db.flush()
+                for step in l["steps"]:
+                    srow = LessonStep(lesson_id=lesson.id, step_type=step["step_type"],
+                                      position=step["position"], payload=step["payload"])
+                    db.add(srow)
                     await db.flush()
-                    if stype in ("practice", "recall"):
-                        rng = random.Random(f"{course.id}-{lesson.id}-{stype}")
-                        correct_word = wl[pos % len(wl)]
-                        distractors = [w for w in rng.sample(all_word_texts, 12)
-                                       if w != correct_word and g not in w][:3]
-                        if len(distractors) < 3:
-                            distractors = [w for w in all_word_texts
-                                           if w != correct_word][:3 - len(distractors)] + distractors
-                        q = Question(
-                            lesson_step_id=step.id, position=0, kind="multiple_choice",
-                            prompt={"text": f"Which word starts with the {ph} sound?"
-                                    if stype == "practice"
-                                    else f"Say it: which word is “{wl[0]}”?",
-                                    "audio": f"audio/phonemes/{g}.mp3"},
-                            points=5,
-                            explanation=f"{correct_word} starts with {ph}.",
+                    for qi, q in enumerate(step["questions"]):
+                        qrow = Question(
+                            lesson_step_id=srow.id, position=qi,
+                            kind="multiple_choice", prompt=q["prompt"],
+                            points=5, explanation=q.get("explanation"),
                         )
-                        db.add(q)
+                        db.add(qrow)
                         await db.flush()
-                        opts = [correct_word] + distractors
-                        rng.shuffle(opts)
-                        for ai, opt in enumerate(opts):
-                            db.add(Answer(question_id=q.id, position=ai, text=opt,
-                                          is_correct=(opt == correct_word),
-                                          feedback=None if opt == correct_word
-                                          else f"Listen again: {ph}…"))
-            # vocabulary rows link words to the course
-            for w in unit_words:
-                await _get_or_create(db, Vocabulary, {"course_id": course.id},
-                                     word_id=words[w].id, level_key="beginning",
-                                     course_id=course.id)
-    # ---- assessment -------------------------------------------------------
+                        for ai, (text, is_correct) in enumerate(q["choices"]):
+                            db.add(Answer(
+                                question_id=qrow.id, position=ai, text=text,
+                                is_correct=bool(is_correct),
+                                feedback=None if is_correct else "Listen again and try!",
+                            ))
+            # vocabulary links every taught word to the course
+            for text in sorted(word_row):
+                await _get_or_create(
+                    db, Vocabulary, {"course_id": course.id},
+                    word_id=word_row[text].id, level_key="beginning",
+                    course_id=course.id,
+                )
+        # immutable snapshot of what was published
+        db.add(ContentVersion(
+            entity_type="course", entity_id=course.id, version=1,
+            payload={"hash": dump["version"], "counts": _counts(dump),
+                     "source": "curriculum.py build_all()"},
+        ))
+
+    # ---------------- placement assessment --------------------------------
     assessment, fresh_a = await _get_or_create(
         db, Assessment,
-        {"title": "English placement check (SEED)", "status": "published",
-         "description": "Short adaptive-style placement; band feeds reading level.",
-         "scoring": {"bands": [
-             {"max": 3, "band": "pre-reader"},
-             {"max": 5, "band": "emerging"},
-             {"max": 7, "band": "beginning"},
-             {"max": 99, "band": "progressing"}]}},
-        key="placement-english-v1",
+        {"title": "Phonics placement check", "status": "published",
+         "description": ("16 spoken picture-MCQ items across initial sounds, letter "
+                         "sounds, blending, rhyming, digraphs and segmenting; the "
+                         "score band sets the learner's starting reading level."),
+         "scoring": {"bands": [{"max": b["max_correct"], "band": b["band"]} for b in BANDS],
+                     "pass_count": len(ASSESSMENT)}},
+        key="placement-english-v2",
     )
     if fresh_a:
-        for qi, (prompt, correct, wrongs) in enumerate(ASSESSMENT_ITEMS):
+        for qi, (prompt, correct, wrongs, skill) in enumerate(ASSESSMENT):
             q = Question(assessment_id=assessment.id, position=qi, points=1,
-                         prompt={"text": prompt}, kind="multiple_choice")
+                         kind="multiple_choice",
+                         prompt={"text": prompt, "skill": skill,
+                                 "emoji": EMOJI.get(correct, "🔤")})
             db.add(q)
             await db.flush()
-            opts = [correct] + wrongs
+            opts = [(correct, True)] + [(w, False) for w in wrongs]
             random.Random(qi).shuffle(opts)
-            for ai, opt in enumerate(opts):
-                db.add(Answer(question_id=q.id, position=ai, text=opt,
-                              is_correct=(opt == correct)))
+            for ai, (text, ok) in enumerate(opts):
+                db.add(Answer(question_id=q.id, position=ai, text=text,
+                              is_correct=ok))
+        db.add(ContentVersion(
+            entity_type="assessment", entity_id=assessment.id, version=1,
+            payload={"items": len(ASSESSMENT), "bands": BANDS,
+                     "hash": hashlib.sha256(
+                         json.dumps(ASSESSMENT, sort_keys=True).encode()
+                     ).hexdigest()[:16]},
+        ))
+    made["assessment"] = str(assessment.id)
+
+    # ---------------- badges / achievements / dev admin --------------------
     for bkey, btitle, bicon, btier in BADGES:
-        await _get_or_create(db, Badge, {"key": bkey, "title": btitle,
-                                         "icon": bicon, "tier": btier}, key=bkey)
+        await _get_or_create(db, Badge, {"title": btitle, "icon": bicon, "tier": btier},
+                             key=bkey)
     for akey, atitle, adesc, bkey, crit in ACHIEVEMENTS:
         badge = await db.scalar(select(Badge).where(Badge.key == bkey))
         await _get_or_create(db, Achievement,
@@ -223,10 +223,14 @@ async def seed_all(db: AsyncSession, *, include_admin: bool = True) -> dict:
     return made
 
 
-def _sentence(grapheme: str, unit_words: list[str], pool: list[str]) -> str:
-    subject = next((w for w in unit_words if grapheme[0] in w), unit_words[0])
-    verb = "sat" if "s" in grapheme else "ran"
-    return f"The {subject} {verb}."
+def _counts(dump: dict) -> dict:
+    lessons = [l for m in dump["modules"] for l in m["lessons"]]
+    return {
+        "modules": len(dump["modules"]),
+        "lessons": len(lessons),
+        "steps": sum(len(l["steps"]) for l in lessons),
+        "questions": sum(len(s["questions"]) for l in lessons for s in l["steps"]),
+    }
 
 
 async def main() -> None:

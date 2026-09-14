@@ -141,24 +141,32 @@ async def test_assessment_scoring_and_level_assignment(client):
     lid = learner["id"]
 
     r = await client.get("/api/v1/assessments", headers=auth(tok))
-    assert r.json()[0]["key"] == "placement-english-v1"
+    assert r.json()[0]["key"] == "placement-english-v2"
 
-    r = await client.post(f"/api/v1/learners/{lid}/assessments/placement-english-v1/start",
+    r = await client.post(f"/api/v1/learners/{lid}/assessments/placement-english-v2/start",
                           headers=auth(tok))
     assert r.status_code == 200
     started = r.json()
     qs = started["questions"]
-    assert len(qs) == 8
+    assert len(qs) == 16
     assert all("is_correct" not in a for q in qs for a in q["answers"])
 
-    # We know seed item order; answering first option every time scores what
-    # it scores — the point is the band math + level assignment are server-side.
-    answers = [{"question_id": q["id"], "answer_id": q["answers"][0]["id"]} for q in qs]
+    # resolve the key from the DB: answering all correctly must land the top
+    # band — proving banding + level assignment are computed server-side.
+    from app.db import get_session_factory
+    from app.models import Answer
+    from sqlalchemy import select
+    async with get_session_factory()() as s:
+        right = {str(a.question_id): str(a.id) for a in await s.scalars(
+            select(Answer).where(Answer.is_correct.is_(True),
+                                 Answer.question_id.in_([q["id"] for q in qs])))}
+    answers = [{"question_id": q["id"], "answer_id": right[q["id"]]} for q in qs]
     r = await client.post(f"/api/v1/learners/{lid}/assessments/results/{started['result_id']}/submit",
                           json={"answers": answers}, headers=auth(tok))
     assert r.status_code == 200
     res = r.json()
-    assert res["score_max"] == 8 and 0 <= res["score"] <= 8 and res["band_key"]
+    assert res["score_max"] == 16 and res["score"] == 16
+    assert res["band_key"] == "proficient"
 
     learner_after = (await client.get(f"/api/v1/learners/{lid}", headers=auth(tok))).json()
     assert learner_after["reading_level_key"] == res["band_key"]

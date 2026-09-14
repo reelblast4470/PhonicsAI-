@@ -140,6 +140,9 @@ UI changes. Remaining seams stay marked:
 |---|---|---|
 | `AuthRepository` | mock: `DeviceAccountRepository` · **live: `HttpAuthRepository`** (`/api/v1/auth`, refresh rotation in `SecureVault`) | done |
 | `ProgressRepository` | `LocalProgressRepository` (+ `BackendProgressSync` mirror: durable queue → server ledger in live/offline-first modes) | done |
+| `CurriculumProvider` | static program in mock mode; **live mode: `GET /content/curriculum`** drives the same screens (server-graded questions, recommendation-based Continue) | done (Phase 3) |
+| `Assessment` | local placement cards in mock mode; **live mode: server-held 16-item check, server scoring & banding** (`AssessmentRemote`) | done (Phase 3) |
+| `ProfileRepository` | local-first; live mode mirrors to `POST /learners` with offline pending queue | done (Phase 3) |
 | `TutorService` | `PhonicsRuleTutor` (deterministic rules) | LLM SSE endpoint via `ApiSseStream` |
 | `SpeechService` | `MockSpeechService` + `LexicalPronunciationScorer` | on-device STT/ASR plugin |
 | `AudioService` | `AssetAudioService` | platform media player |
