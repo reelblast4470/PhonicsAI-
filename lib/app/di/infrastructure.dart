@@ -8,6 +8,7 @@ import '../../core/billing/billing_gateway.dart';
 import '../../core/env/app_config.dart';
 import '../../core/network/api_client.dart';
 import '../../core/network/auth_token_provider.dart';
+import '../../core/network/session_token_holder.dart';
 import '../../core/notifications/reminder_scheduler.dart';
 import '../../core/security/secure_vault.dart';
 import '../../core/speech/speech_service.dart';
@@ -59,15 +60,26 @@ final billingGatewayProvider = Provider<BillingGateway>((ref) {
   return gateway;
 });
 
+/// The live bearer-token source. `features/auth` fills it in whenever the
+/// session changes; ApiClient reads it per request and refreshes on 401 via
+/// the repository's hook installed on the holder.
+final sessionTokenHolderProvider = Provider<SessionTokenHolder>((ref) {
+  final holder = SessionTokenHolder();
+  ref.onDispose(holder.dispose);
+  return holder;
+});
+
 /// The single HTTP facade. Features never construct `http` calls themselves —
 /// that is how timeouts, token refresh and error mapping stay consistent.
 final apiClientProvider = Provider<ApiClient>(
   (ref) => ApiClient(
     config: ref.watch(appConfigProvider),
     httpClient: ref.watch(httpClientProvider),
-    // TODO(auth): hand the ApiClient the session's token provider so 401s can
-    // trigger a refresh. Mock mode has no token, which is correct behaviour.
-    tokenProvider: const NoAuthTokenProvider(),
+    // Mock mode has no token, which is correct behaviour; live/offlineFirst
+    // share the session holder so 401s trigger a refresh transparently.
+    tokenProvider: ref.watch(appConfigProvider).backendMode == BackendMode.mock
+        ? const NoAuthTokenProvider()
+        : ref.watch(sessionTokenHolderProvider),
   ),
 );
 
@@ -75,7 +87,9 @@ final apiSseStreamProvider = Provider<ApiSseStream>(
   (ref) => ApiSseStream(
     ref.watch(appConfigProvider),
     ref.watch(httpClientProvider),
-    const NoAuthTokenProvider(),
+    ref.watch(appConfigProvider).backendMode == BackendMode.mock
+        ? const NoAuthTokenProvider()
+        : ref.watch(sessionTokenHolderProvider),
   ),
 );
 

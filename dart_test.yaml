@@ -1,0 +1,4 @@
+name: phonicsai_test
+tags:
+  live:  # requires a running API; see test/live/live_backend_contract_test.dart
+

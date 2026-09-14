@@ -33,6 +33,26 @@ class ApiClient {
   }) =>
       _send('GET', path, query: query);
 
+  /// Same pipeline as [getJson] but for endpoints that answer with a bare
+  /// JSON array (catalog lists, learner lists).
+  Future<List<Map<String, dynamic>>> getListJson(
+    String path, {
+    Map<String, String>? query,
+  }) async {
+    final decoded = await _sendRaw('GET', path, query: query);
+    if (decoded is List) {
+      return decoded.cast<Map<String, dynamic>>();
+    }
+    if (decoded is Map<String, dynamic> && decoded['data'] == null) {
+      return const [];
+    }
+    throw const AppFailure(
+      kind: FailureKind.parse,
+      message: 'The response could not be read.',
+      detail: 'expected a JSON array',
+    );
+  }
+
   Future<Map<String, dynamic>> postJson(
     String path, {
     Map<String, Object?>? body,
@@ -48,7 +68,7 @@ class ApiClient {
   Future<Map<String, dynamic>> deleteJson(String path) =>
       _send('DELETE', path);
 
-  Future<Map<String, dynamic>> _send(
+  Future<dynamic> _sendRaw(
     String method,
     String path, {
     Map<String, String>? query,
@@ -73,7 +93,13 @@ class ApiClient {
             .send(request)
             .timeout(timeout2)
             .then(http.Response.fromStream);
-        return _decode(streamed);
+        if (streamed.statusCode == 401 && attempt == 1) {
+          // One transparent refresh-and-retry; if auth cannot mint a token,
+          // the caller sees the normal 401 mapping.
+          final fresh = await _tokens.refresh();
+          if (fresh != null && fresh.isNotEmpty) continue;
+        }
+        return _decodeRaw(streamed);
       } on TimeoutException {
         if (attempt == 1) continue;
         throw const AppFailure(
@@ -109,13 +135,23 @@ class ApiClient {
     };
   }
 
-  Map<String, dynamic> _decode(http.Response response) {
+  Future<Map<String, dynamic>> _send(
+    String method,
+    String path, {
+    Map<String, String>? query,
+    Map<String, Object?>? body,
+  }) async {
+    final decoded = await _sendRaw(method, path, query: query, body: body);
+    if (decoded is Map<String, dynamic>) return decoded;
+    if (decoded == null) return const {};
+    return const {'data': null};
+  }
+
+  dynamic _decodeRaw(http.Response response) {
     final status = response.statusCode;
     if (status >= 200 && status < 300) {
-      if (response.body.isEmpty) return const {};
-      final decoded = jsonDecode(response.body);
-      if (decoded is Map<String, dynamic>) return decoded;
-      return const {'data': null};
+      if (response.body.isEmpty) return null;
+      return jsonDecode(response.body);
     }
     throw _mapStatus(status, response.body);
   }

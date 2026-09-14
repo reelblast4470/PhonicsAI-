@@ -8,6 +8,7 @@ import '../../../core/util/date_util.dart';
 import '../../../features/progress/domain/spaced_repetition.dart';
 import '../domain/progress_models.dart';
 import '../domain/progress_repository.dart';
+import 'backend_progress_sync.dart';
 
 /// Offline-first progress. Every tap in a lesson writes here *immediately*, so
 /// a tablet that dies mid-lesson loses at most the current stage.
@@ -16,7 +17,7 @@ import '../domain/progress_repository.dart';
 /// `pendingSync` rows are pushed opportunistically — the UI never waits on the
 /// network to show progress.
 class LocalProgressRepository implements ProgressRepository {
-  LocalProgressRepository({required KeyValueStore store})
+  LocalProgressRepository({required KeyValueStore store, this.mirror})
     : _lessons = CollectionStore<LessonProgress>(
         store: store,
         namespace: lessonNamespace,
@@ -47,6 +48,10 @@ class LocalProgressRepository implements ProgressRepository {
         fromJson: _Wallet.fromJson,
         toJson: (value) => value.toJson(),
       );
+
+  /// Optional backend mirror (fire-and-forget, offline-safe). Null in mock
+  /// mode and in every existing test — local behaviour is unaffected.
+  final ProgressMirror? mirror;
 
   static const lessonNamespace = 'phonicsai.lesson_progress';
   static const masteryNamespace = 'phonicsai.phoneme_mastery';
@@ -209,6 +214,15 @@ class LocalProgressRepository implements ProgressRepository {
         grade: accuracy >= 0.85 ? 5 : (accuracy >= 0.6 ? 3 : 1),
       );
     }
+    _mirror(
+      () => mirror!.onLessonFinish(
+        profileId: profileId,
+        lessonId: lessonId,
+        stars: stars,
+        accuracy: accuracy,
+        secondsSpent: secondsSpent,
+      ),
+    );
     return const Result.ok(null);
   }
 
@@ -244,6 +258,13 @@ class LocalProgressRepository implements ProgressRepository {
       grade: grade,
     );
     await _mastery.put(key, updated);
+    _mirror(
+      () => mirror!.onSoundReview(
+        profileId: profileId,
+        phoneme: phoneme,
+        grade: grade,
+      ),
+    );
     return const Result.ok(null);
   }
 
@@ -276,6 +297,15 @@ class LocalProgressRepository implements ProgressRepository {
         gamesPlayed: 1,
       ),
     );
+    _mirror(
+      () => mirror!.onGameRound(
+        profileId: profileId,
+        gameId: gameId,
+        score: score,
+        stars: stars,
+        secondsSpent: secondsSpent,
+      ),
+    );
     return const Result.ok(null);
   }
 
@@ -292,6 +322,9 @@ class LocalProgressRepository implements ProgressRepository {
         seconds: minutes * 60,
         minutesReadAloud: minutes,
       ),
+    );
+    _mirror(
+      () => mirror!.onReadingMinutes(profileId: profileId, minutes: minutes),
     );
     return const Result.ok(null);
   }
@@ -330,6 +363,17 @@ class LocalProgressRepository implements ProgressRepository {
     await _wallet.remove(profileId);
     _notify();
     return const Result.ok(null);
+  }
+
+  /// Fire-and-forget mirror dispatch. Deferred to a microtask and fully
+  /// isolated: a throwing/networked mirror can NEVER fail a local write or
+  /// crash the UI — learning keeps working when the backend is down.
+  void _mirror(Future<void> Function() push) {
+    final m = mirror;
+    if (m == null) return;
+    unawaited(
+      Future<void>.microtask(push).catchError((Object _) {}),
+    );
   }
 
   Future<void> _bumpWallet(String profileId, int delta) async {

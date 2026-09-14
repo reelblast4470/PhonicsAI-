@@ -230,3 +230,35 @@ build/web.
 - No secrets client-side: no AI keys, no Play Billing public keys embedded;
   verification is documented as server-side.
 - Full es/hi translations deferred (structure + fallbacks are in place).
+
+## Phase 2 — backend foundation + client↔server wiring
+
+Backend (`api/`): FastAPI + SQLAlchemy 2 async + Postgres; 37 tables,
+Alembic migration `4f16068902fa`; argon2id, JWT typed realms (user/learner/
+admin), rotating refresh with family-reuse revocation, single-use hashed email
+tokens via file outbox; strict `extra=forbid` request models; structured
+`{"error":{code,message,details}}`; slowapi rate limits; deterministic
+progress engine (event ledger → XP/stars/streak/SRS/daily tasks, idempotent
+via `client_event_id`); admin audit log on every mutation; dev seed clearly
+marked `origin='seed-dev'`.
+
+Client: `HttpAuthRepository` (full `AuthRepository` interface),
+`SessionTokenHolder` bearer plumbing (401 → refresh → retry once),
+`BackendProgressSync` durable mirror queue in `LocalProgressRepository`
+(fire-and-forget; a down server can never block or fail a learning write).
+`flutter analyze` + all 136 tests pass in mock (default) mode; live mode is
+opt-in via `--dart-define=BACKEND_MODE=live`.
+
+**Verified:** 41/41 `pytest` (incl. a 13-step end-to-end journey) and — with
+uvicorn actually running — `PHONICS_LIVE_BASE=… flutter test
+test/live/live_backend_contract_test.dart` green over a real socket.
+
+Real defects the tests caught (fixed): slowapi header injection crashing
+every rate-limited endpoint when the limiter was enabled (tests had it off —
+only the live smoke found it); `db.stream()` needing `await` under async
+SQLAlchemy + `.scalars()` for ORM rows; content-tree relationships needing
+`lazy="selectin"` (MissingGreenlet during serialization); refresh-family
+revocation being rolled back by the request session on error responses
+(own-session commit); CORS env parsing (JSON vs comma-separated); the
+`_HttpClientSend` backlink silently dropped by a `.call` tear-off, so
+authenticated DELETEs went out bearerless (live contract test caught it).

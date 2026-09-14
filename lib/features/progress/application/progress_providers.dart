@@ -1,15 +1,33 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../app/di/infrastructure.dart';
+import '../../../core/env/app_config.dart';
 import '../../curriculum/domain/lesson.dart';
 import '../../home/domain/daily_mission.dart';
+import '../data/backend_progress_sync.dart';
 import '../data/local_progress_repository.dart';
 import '../domain/progress_models.dart';
 import '../domain/progress_repository.dart';
 
+/// Backend mirror: enabled for live *and* offlineFirst modes (a queue absorbs
+/// downtime there), null in mock mode so nothing changes for tests/previews.
+final backendProgressSyncProvider = Provider<BackendProgressSync?>((ref) {
+  final config = ref.watch(appConfigProvider);
+  if (config.backendMode == BackendMode.mock || !config.hasBackend) {
+    return null;
+  }
+  final sync = BackendProgressSync(
+    api: ref.watch(apiClientProvider),
+    store: ref.watch(keyValueStoreProvider),
+  );
+  ref.onDispose(sync.dispose);
+  return sync;
+});
+
 final progressRepositoryProvider = Provider<ProgressRepository>((ref) {
   final repository = LocalProgressRepository(
     store: ref.watch(keyValueStoreProvider),
+    mirror: ref.watch(backendProgressSyncProvider),
   );
   ref.onDispose(repository.dispose);
   return repository;

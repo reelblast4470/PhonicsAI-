@@ -59,8 +59,11 @@ flutter build windows --release               # requires a Windows host w/ Visua
 flutter run --dart-define=BACKEND_MODE=mock          # default: local-only, all mocks
 flutter run --dart-define=BACKEND_MODE=offline_first
 flutter run --dart-define=BACKEND_MODE=live \
-        --dart-define=API_BASE_URL=https://api.example.com
+        --dart-define=API_BASE_URL=https://api.example.com/api/v1
 ```
+
+`live` mode talks to the FastAPI backend in [`api/`](api/README.md) — see its
+README for running it locally (`uvicorn app.main:app --port 8000`).
 
 `lib/core/env/app_config.dart` reads these. Keys for AI services, Play Billing,
 etc. are **never** stored in the client: they belong in the backend, which the
@@ -126,14 +129,17 @@ widget tests run against the same composition the app ships with.
 
 ## Integration readiness
 
-The mock layer is *deliberately* the only implementation that ships today.
-Swapping in a real backend means implementing an interface and changing one
-line of DI:
+Phase 2 landed the backend foundation in `api/` (FastAPI + Postgres: auth,
+learners, content, progress engine, daily tasks, assessments, analytics,
+feedback, billing stub, admin/audit) and wired the client adapters that speak
+to it. Mock mode still ships by default: `BACKEND_MODE=live` flips auth, the
+bearer-token plumbing (`SessionTokenHolder`) and the progress mirror with no
+UI changes. Remaining seams stay marked:
 
 | Interface (`domain/`) | Today's adapter (`data/`, `app/di/`) | Real drop-in |
 |---|---|---|
-| `AuthRepository` | `DeviceAccountRepository` (local, device-bound) | OIDC/backend session API |
-| `ProgressRepository` | `LocalProgressRepository` | same + sync queue |
+| `AuthRepository` | mock: `DeviceAccountRepository` · **live: `HttpAuthRepository`** (`/api/v1/auth`, refresh rotation in `SecureVault`) | done |
+| `ProgressRepository` | `LocalProgressRepository` (+ `BackendProgressSync` mirror: durable queue → server ledger in live/offline-first modes) | done |
 | `TutorService` | `PhonicsRuleTutor` (deterministic rules) | LLM SSE endpoint via `ApiSseStream` |
 | `SpeechService` | `MockSpeechService` + `LexicalPronunciationScorer` | on-device STT/ASR plugin |
 | `AudioService` | `AssetAudioService` | platform media player |
@@ -157,10 +163,11 @@ exist anywhere in the client; `MockBillingGateway` never contacts a store.
 
 The client is complete and tested; deploying it "for real" still needs, in order:
 
-1. **Backend** implementing the four `TODO(backend)` seams: auth
-   (`/auth/*` incl. password-reset + cascade account deletion), tutor context
-   (SSE), billing verification, support ticket intake. Then flip
-   `--dart-define=BACKEND_MODE=live --dart-define=API_BASE_URL=…`.
+1. **Backend**: auth, learners, content, progress, daily tasks, assessments,
+   analytics, feedback, admin + audit and account-deletion cascade are built
+   and tested in `api/` (41 API tests + a live Flutter↔FastAPI contract test).
+   Still open: tutor SSE context endpoint, server-side store receipt
+   verification, support intake queueing, lesson-id content mapping (Phase 3).
 2. **Release signing**: keystore + `android/key.properties` (git-ignored by
    design), Play App Signing recommended; iOS cert/profile via Xcode.
 3. **Store material**: replace the generated launcher icons (all densities),

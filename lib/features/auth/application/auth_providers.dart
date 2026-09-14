@@ -1,17 +1,31 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../app/di/infrastructure.dart';
+import '../../../core/env/app_config.dart';
 import '../../../core/error/failure.dart';
 import '../../../core/result/result.dart';
 import '../data/device_account_repository.dart';
+import '../data/http_auth_repository.dart';
 import '../domain/auth_models.dart';
 import '../domain/auth_repository.dart';
 
 /// Auth adapter for the current [AppConfig.backendMode].
 ///
-/// mock mode  -> [DeviceAccountRepository] (per-device, no network at all)
-/// live mode  -> `HttpAuthRepository` (POST /auth/session) — see README
+/// mock / offlineFirst -> [DeviceAccountRepository] (per-device, no network)
+/// live                -> [HttpAuthRepository] against `api/` (`/api/v1/auth`)
 final authRepositoryProvider = Provider<AuthRepository>((ref) {
+  final config = ref.watch(appConfigProvider);
+  if (config.backendMode == BackendMode.live && config.hasBackend) {
+    final repository = HttpAuthRepository.live(
+      config: config,
+      client: ref.watch(httpClientProvider),
+      store: ref.watch(keyValueStoreProvider),
+      vault: ref.watch(secureVaultProvider),
+      tokenHolder: ref.watch(sessionTokenHolderProvider),
+    );
+    ref.onDispose(repository.dispose);
+    return repository;
+  }
   final repository = DeviceAccountRepository(
     store: ref.watch(keyValueStoreProvider),
     vault: ref.watch(secureVaultProvider),
