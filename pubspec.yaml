@@ -1,0 +1,41 @@
+name: phonicsai
+description: "PhonicsAI — an AI-guided phonics reading tutor for learners aged 3-6 (Android, iOS, Windows)."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.13.3
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+
+  # State management (kept on the stable 2.x Notifier API; no codegen required).
+  flutter_riverpod: 2.6.1
+
+  # Declarative, deep-link friendly navigation with an adaptive shell.
+  go_router: ^17.0.0
+
+  # HTTP client used only by the API layer (no keys shipped in the app).
+  http: ^1.2.2
+
+  # Lightweight key-value persistence; swapped for a secure store behind its interface.
+  shared_preferences: ^2.3.2
+
+  intl: any
+
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  generate: true
+
+  assets:
+    - assets/brand/

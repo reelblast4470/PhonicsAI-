@@ -1,0 +1,35 @@
+{
+  "@@locale": "hi",
+  "appName": "Phonिक्सAI",
+  "navHome": "होम",
+  "navLearn": "सीखें",
+  "navGames": "खेल",
+  "navTutor": "ट्यूटर",
+  "navProgress": "प्रगति",
+  "navParent": "बड़े लोग",
+  "actionContinue": "जारी रखें",
+  "actionNext": "आगे",
+  "actionBack": "वापस",
+  "actionDone": "हो गया",
+  "actionPlay": "खेलें",
+  "actionListen": "सुनो",
+  "actionSayIt": "बोलो",
+  "actionTryAgain": "फिर कोशिश करें",
+  "actionStart": "शुरू करें",
+  "profileWhosLearning": "कौन सीख रहा है?",
+  "profileName": "नाम",
+  "profileAge": "उम्र",
+  "homeGreeting": "नमस्ते {name}!",
+  "homeDailyMission": "आज का मिशन",
+  "learnTitle": "फोनिक्स यात्रा",
+  "gamesTitle": "खेल और अभ्यास",
+  "progressTitle": "मेरी प्रगति",
+  "settingsTitle": "सेटिंग्स",
+  "@homeGreeting": {
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  }
+}

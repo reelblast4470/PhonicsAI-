@@ -1,0 +1,28 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  language:
+    strict-casts: true
+    strict-raw-types: true
+  exclude:
+    - lib/l10n/generated/**
+    - build/**
+    - "**/*.g.dart"
+    - android/**
+    - ios/**
+    - web/**
+    - windows/**
+
+linter:
+  rules:
+    - prefer_single_quotes
+    - always_declare_return_types
+    - avoid_print
+    - unawaited_futures
+    - directives_ordering
+    - prefer_final_locals
+    - require_trailing_commas
+    - use_super_parameters
+    - sized_box_for_whitespace
+    - avoid_unnecessary_containers
+    - use_build_context_synchronously
