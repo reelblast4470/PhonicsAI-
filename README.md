@@ -43,10 +43,15 @@ flutter test              # 118 tests: unit + widget + whole-app flow at 4 windo
 flutter analyze           # must stay at "No issues found!" (strict lints on)
 
 flutter run -d <device>                       # debug
-flutter build apk --release --flavor dev      # Android (dev/staging/prod flavors)
-flutter build web --release --no-wasm-dry-run # web
-flutter build windows --release
+flutter build apk --release --flavor dev      # Android (dev/staging/prod flavors wired in gradle)
+flutter build web --release --no-wasm-dry-run # web  <- CI-verified build command
+flutter build windows --release               # requires a Windows host w/ Visual Studio toolchain
 ```
+
+> Verified in CI (Linux sandbox): `flutter analyze`, all tests, and the **web
+> release build**. Android flavors are declared in `android/app/build.gradle.kts`
+> but no APK was compiled here (no Android SDK on this host). iOS needs scheme
+> wiring for flavors; Windows needs a real Windows toolchain.
 
 ### Backend mode (compile-time, no secrets in code)
 
@@ -147,3 +152,25 @@ exist anywhere in the client; `MockBillingGateway` never contacts a store.
 - The pronunciation scorer is a word-level lexical mock — real phoneme scoring
   needs the speech adapter.
 - Letter tracing uses a geometric path-completion score, not a handwriting engine.
+
+## Production deployment checklist
+
+The client is complete and tested; deploying it "for real" still needs, in order:
+
+1. **Backend** implementing the four `TODO(backend)` seams: auth
+   (`/auth/*` incl. password-reset + cascade account deletion), tutor context
+   (SSE), billing verification, support ticket intake. Then flip
+   `--dart-define=BACKEND_MODE=live --dart-define=API_BASE_URL=…`.
+2. **Release signing**: keystore + `android/key.properties` (git-ignored by
+   design), Play App Signing recommended; iOS cert/profile via Xcode.
+3. **Store material**: replace the generated launcher icons (all densities),
+   app name, privacy policy URL (required for a children's app; COPPA/GDPR-K
+   review before listing), Play Data Safety form.
+4. **Observability**: crash reporting (Sentry/Firebase Crashlytics) wired in
+   `app/bootstrap.dart`; the analytics interface already has a single sink.
+5. **Notifications**: real `ReminderScheduler` adapter (`flutter_local_notifications`)
+   if reminders should fire when the app is closed.
+6. **i18n completion** for es/hi (the ARB files are the full list to translate).
+7. Platform builds on real toolchains: `flutter build appbundle` (Play),
+   `flutter build ipa` (App Store), `flutter build windows` — none of these
+   ran in this repo's CI (Linux sandbox, no Android SDK/Xcode/MSVC).

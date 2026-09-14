@@ -29,6 +29,25 @@ android {
         versionName = flutter.versionName
     }
 
+    // Mirrors lib/core/env/app_config.dart's AppFlavor. Build with, e.g.:
+    //   flutter build apk --release --flavor dev \
+    //     --dart-define=FLAVOR=dev --dart-define=BACKEND_MODE=mock
+    // (the dart-defines are what the app reads; the flavor only splits ids here)
+    flavorDimensions += "environment"
+    productFlavors {
+        create("dev") {
+            dimension = "environment"
+            applicationIdSuffix = ".dev"
+        }
+        create("staging") {
+            dimension = "environment"
+            applicationIdSuffix = ".staging"
+        }
+        create("prod") {
+            dimension = "environment"
+        }
+    }
+
     buildTypes {
         release {
             // TODO: Add your own signing config for the release build.

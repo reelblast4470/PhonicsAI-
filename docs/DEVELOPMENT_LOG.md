@@ -212,6 +212,12 @@ flows in app_flow/smoke.
   `--no-wasm-dry-run` (dart2js + dart2wasm dry-run double-compiles and OOM'd);
   documented.
 - Removed now-unused `PlaceholderScreen` (every screen it stood in for shipped).
+- README audit found a false claim: it advertised `--flavor dev` while
+  `android/app/build.gradle.kts` defined no flavors. Fixed by actually wiring
+  `dev/staging/prod` flavors (id suffixes) mirroring `AppConfig`, and the README
+  now states exactly what is CI-verified (analyze/test/web build) vs not
+  (APK/IPA/Windows builds need real toolchains). Store-listing prerequisites
+  documented as a deployment checklist.
 
 **Final check:** `flutter analyze` → No issues found. `flutter test` →
 118 passing. `flutter build web --release --no-wasm-dry-run` → ✓ Built
