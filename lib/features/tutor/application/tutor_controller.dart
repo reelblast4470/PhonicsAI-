@@ -4,10 +4,13 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../app/di/infrastructure.dart';
+import '../../../core/env/app_config.dart';
 import '../../../core/storage/key_value_store.dart';
 import '../../../core/util/ids.dart';
 import '../../profile/application/profile_providers.dart';
+import '../../profile/data/sync_profile_repository.dart';
 import '../../progress/application/progress_providers.dart';
+import '../data/api_tutor_service.dart';
 import '../domain/tutor_models.dart';
 import '../domain/tutor_service.dart';
 
@@ -179,11 +182,28 @@ extension on TutorThread {
   }
 }
 
-/// The tutor adapter for the current backend mode. `live` replaces this with an
-/// HTTP call to our own /tutor endpoint — never to a model provider directly.
-final tutorServiceProvider = Provider<TutorService>(
-  (ref) => const PhonicsRuleTutor(),
-);
+/// The tutor adapter for the current backend mode. Live mode (Phase 5) swaps
+/// in [ApiTutorService], which talks only to our own /tutor endpoint — never
+/// to a model provider directly. Until the active profile is bound to a
+/// backend learner (or when offline/mock), the local rule engine answers
+/// honestly — it is labelled as such in the UI and never pretends to be AI.
+final tutorServiceProvider = Provider<TutorService>((ref) {
+  final config = ref.watch(appConfigProvider);
+  if (config.hasBackend && config.backendMode != BackendMode.mock) {
+    final profileId = ref.watch(activeProfileIdProvider);
+    final repository = ref.watch(profileRepositoryProvider);
+    if (profileId != null && repository is SyncProfileRepository) {
+      final remoteId = repository.remoteIdFor(profileId);
+      if (remoteId != null) {
+        return ApiTutorService(
+          api: ref.watch(apiClientProvider),
+          learnerId: remoteId,
+        );
+      }
+    }
+  }
+  return const PhonicsRuleTutor();
+});
 
 final tutorProvider = NotifierProvider<TutorController, TutorThread>(
   TutorController.new,

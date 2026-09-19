@@ -1,25 +1,22 @@
 """Subscriptions. Entitlements flip ONLY on server-verified events; a client
-report is recorded (useful for reconciliation) but grants nothing. This is
-where the Play/App Store server-side verification worker plugs in later."""
+report is recorded (useful for reconciliation) but grants nothing. Verification
+lives in app/billing.py (BILLING_MODE=mock|google_play|app_store|off) and the
+replay lock is the unique (store, transaction_id) row in verified_receipts."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request, Response
 from sqlalchemy import select
 
+from .. import billing
 from ..analytics import track
 from ..deps import DbSession, Parent
+from ..errors import AppError
+from ..limiter import limiter
 from ..models import Subscription, SubscriptionEvent
-from ..schemas import SubscriptionEventIn, SubscriptionOut
+from ..schemas import ReceiptIn, SubscriptionEventIn, SubscriptionOut
 
 router = APIRouter(prefix="/subscriptions", tags=["subscriptions"])
 
-# SEED pricing for dev; the real catalog/price comes from the store listings.
-PLANS = [
-    {"key": "plus_monthly", "title": "Plus Monthly", "price": "$7.99",
-     "billing_period": "monthly", "trial_days": 7, "origin": "seed-dev"},
-    {"key": "plus_yearly", "title": "Plus Yearly", "price": "$49.99",
-     "billing_period": "yearly", "trial_days": 14, "savings": "save 48%",
-     "origin": "seed-dev"},
-]
+PLANS = billing.PLANS  # catalog + store-product mapping live in billing.py
 
 
 @router.get("/plans", response_model=list[dict])
@@ -52,4 +49,31 @@ async def report_event(body: SubscriptionEventIn, parent: Parent, db: DbSession)
                                      "receipt_received": body.store_receipt is not None}))
     await db.flush()
     return {"accepted": True, "entitlement_changed": False,
-            "note": "Store receipts are applied after server-side verification"}
+            "note": "Store receipts are applied after server-side verification "
+                    "(POST /subscriptions/me/receipt)"}
+
+
+@router.post("/me/receipt", response_model=dict)
+@limiter.limit("20/minute")
+async def verify_receipt(request: Request, response: Response, body: ReceiptIn,
+                         parent: Parent, db: DbSession) -> dict:
+    """The ONLY endpoint that flips entitlements. The store itself vouches
+    for the receipt; our answer, not the client's token, decides what
+    unlocks."""
+    v = await billing.verify_receipt(store=body.store, product_id=body.product_id,
+                                      token=body.purchase_token,
+                                      transaction_id=body.transaction_id)
+    existing = await billing.find_receipt(db, v)
+    if existing is not None and existing.user_id != parent.user.id:
+        raise AppError("receipt_used_elsewhere",
+                       "This purchase is already linked to a different account.", 409)
+    if existing is None:
+        db.add(billing.receipt_row(v, parent.user.id))
+        await db.flush()
+    sub = await billing.apply_verified(db, parent.user.id, v,
+                                       first_time=existing is None)
+    return {"plan_key": sub.plan_key, "status": sub.status, "store": sub.store,
+            "verified": sub.verified,
+            "current_period_end": sub.current_period_end,
+            "cancel_at_period_end": sub.cancel_at_period_end,
+            "granted": True, "already_recorded": existing is not None}

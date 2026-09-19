@@ -11,3 +11,4 @@ pydantic-settings>=2.10
 pytest>=8.4
 pytest-asyncio>=1.0
 httpx>=0.28
+python-multipart>=0.0.20

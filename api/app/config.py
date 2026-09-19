@@ -55,6 +55,38 @@ class Settings(BaseSettings):
 
     max_event_batch: int = 50
 
+    # ---- Phase 4: AI content-intelligence pipeline ------------------------
+    # Provider abstraction: 'mock' is deterministic + free and ships as the
+    # default; real providers need a key (backend-side only, never in the
+    # client). Costs are estimates used for budget visibility, not billing.
+    ai_provider: str = "mock"           # mock | gemini | openai_compatible
+    ai_model: str = ""                  # "" -> provider default (recorded)
+    ai_api_key: str = ""                # from env only — never logged, never sent out
+    ai_base_url: str = ""               # openai_compatible: https://…/v1
+    ai_request_timeout_s: int = 120
+    ai_cost_input_per_1m_usd: float = 0.0    # advisory cost estimate
+    ai_cost_output_per_1m_usd: float = 0.0
+    ai_max_chunks_per_job: int = 240    # cost guard: process head, flag the rest
+    ai_chunk_min_tokens: int = 500
+    ai_chunk_max_tokens: int = 1000
+    knowledge_min_confidence: float = 0.45
+    verbatim_max_words: int = 20        # >= this many consecutive words from a
+                                        # source in generated content -> blocked
+
+    # ---- Phase 5: store verification + AI tutor --------------------------
+    billing_mode: str = "mock"            # mock | google_play | app_store | off
+    google_package: str = ""              # applicationId from Play Console
+    google_access_token: str = ""         # ops-minted androidpublisher OAuth token
+    appstore_shared_secret: str = ""
+    appstore_sandbox: bool = False
+    tutor_free_daily_messages: int = 3    # per learner, UTC day, server-counted
+    tutor_max_message_chars: int = 600
+
+    uploads_dir: str = "data/uploads"
+    upload_max_mb: int = 25
+    upload_zip_max_uncompressed_mb: int = 60   # zip-bomb guard for docx/epub
+    ocr_command: str = ""   # optional shell hook: "ocr-extract {pdf} {out.txt}"
+
     @property
     def cors_origins_list(self) -> list[str]:
         return _origins_list(self.cors_origins)
@@ -71,6 +103,16 @@ class Settings(BaseSettings):
                 )
             if "phonicsai:devlocal" in self.database_url:
                 raise RuntimeError("Refusing to start: dev database credentials in production")
+        if self.ai_provider not in ("mock", "gemini", "openai_compatible"):
+            raise RuntimeError(f"Unknown AI_PROVIDER={self.ai_provider!r}")
+        if self.ai_provider in ("gemini", "openai_compatible") and not self.ai_api_key:
+            raise RuntimeError(f"AI_PROVIDER={self.ai_provider} requires AI_API_KEY")
+        if self.billing_mode not in ("mock", "google_play", "app_store", "off"):
+            raise RuntimeError(f"Unknown BILLING_MODE={self.billing_mode!r}")
+        if self.is_production and self.billing_mode == "mock":
+            raise RuntimeError(
+                "Refusing to start: BILLING_MODE=mock would accept fake receipts "
+                "in production - use google_play/app_store or 'off'")
 
 
 @lru_cache

@@ -1,0 +1,113 @@
+<!doctype html>
+<!-- PhonicsAI admin console (dev/staging tool).
+     Talks only to /api/v1/admin/content/* with a bearer token held in this
+     tab's memory. It is the reference UI for the Phase-4 endpoints: sources,
+     jobs, knowledge, proposals (approve / reject / publish / rollback),
+     conflicts and usage. Production deployments should replace it with the
+     real admin dashboard built on the same API. -->
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PhonicsAI — Content Intelligence</title>
+<style>
+:root{--bg:#0f172a;--card:#1e293b;--tx:#e2e8f0;--mut:#94a3b8;--ok:#34d399;--warn:#fbbf24;--err:#f87171;--acc:#60a5fa}
+*{box-sizing:border-box}body{margin:0;font:14px/1.45 system-ui,sans-serif;background:var(--bg);color:var(--tx)}
+header{display:flex;gap:12px;align-items:center;padding:14px 20px;background:var(--card)}
+header h1{font-size:16px;margin:0 auto 0 0}
+main{padding:18px;max-width:1150px;margin:0 auto}
+section{background:var(--card);border-radius:10px;padding:14px 16px;margin-bottom:16px}
+h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);margin:0 0 10px}
+button,input,textarea,select{font:inherit;border-radius:7px;border:1px solid #334155;background:#0b1220;color:var(--tx);padding:7px 10px}
+button{cursor:pointer;background:var(--acc);color:#0b1220;border:0;font-weight:600}
+button.ghost{background:transparent;color:var(--acc);border:1px solid var(--acc)}
+button.danger{background:var(--err);color:#0b1220}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td,th{padding:6px 8px;border-bottom:1px solid #334155;text-align:left;vertical-align:top}
+.pill{padding:2px 8px;border-radius:99px;font-size:11px;font-weight:700;background:#334155}
+.pill.ok{background:var(--ok);color:#052}.pill.warn{background:var(--warn);color:#420}.pill.err{background:var(--err);color:#311}
+pre{white-space:pre-wrap;font-size:12px;background:#0b1220;padding:8px;border-radius:6px;max-height:220px;overflow:auto}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+label{display:block;font-size:11px;color:var(--mut);margin-bottom:2px}
+details{margin-top:6px}#flash{position:fixed;right:14px;top:58px;max-width:420px;background:#334155;border-radius:8px;padding:10px 12px;display:none;font-size:13px}
+</style></head><body>
+<header><h1>PhonicsAI · Content Intelligence</h1>
+<span id="who" style="color:var(--mut)"></span></header>
+<div id="flash"></div>
+<main>
+<section id="login">
+ <h2>Admin sign-in</h2>
+ <div class="grid" style="max-width:520px">
+  <div><label>username</label><input id="u" value="admin-dev"></div>
+  <div><label>password</label><input id="p" type="password"></div></div>
+ <p><button onclick="login()">Sign in</button>
+ <span style="color:var(--mut);font-size:12px"> tokens stay in this tab only</span></p>
+</section>
+
+<div id="app" style="display:none">
+<section><h2>New source — paste text (or upload a file)</h2>
+ <div class="grid">
+  <div><label>title *</label><input id="n_title" placeholder="e.g. Letter Sounds Handbook"></div>
+  <div><label>license *</label><select id="n_lic">
+    <option>public_domain</option><option>self_owned</option><option>licensed</option>
+    <option>permission_granted</option><option>unknown</option></select></div>
+  <div><label>author</label><input id="n_author"></div>
+  <div><label>file (pdf·docx·epub·txt·png)</label><input id="n_file" type="file"></div></div>
+ <div><label>text (paste intake)</label><textarea id="n_text" rows="4" style="width:100%"></textarea></div>
+ <p><button onclick="createSource()">Create source &amp; queue analysis</button></p></section>
+
+<section><h2>Sources &amp; jobs</h2><div id="sources"></div></section>
+<section><h2>Proposals awaiting a human</h2><div id="proposals"></div></section>
+<section><h2>Conflicts between sources</h2><div id="conflicts"></div></section>
+<section><h2>AI usage</h2><div id="usage"></div></section>
+</div></main>
+<script>
+const V1="/api/v1";let T=null;
+const $=id=>document.getElementById(id);
+const pill=s=>`<span class="pill ${{completed:'ok',processed:'ok',ai_reviewed:'ok',queued:'',extracting:'warn',chunking:'warn',analyzing:'warn',mapping:'warn',generating:'warn',validating:'warn',needs_review:'warn',human_review:'warn',approved:'ok',published:'ok',failed:'err',rejected:'',rolled_back:'',draft:'',intake:''}[s]||''}">${s}</span>`;
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+async function api(path,opt={}){opt.headers=Object.assign({"Content-Type":"application/json"},opt.headers||{});
+ if(T)opt.headers.Authorization="Bearer "+T;
+ const r=await fetch(V1+path,opt);
+ if(r.status===401){T=null;show("login");flash("Signed out — log in again");throw 0}
+ const j=r.status===204?null:await r.json().catch(()=>null);
+ if(!r.ok)throw Error((j&&j.error&&j.error.message)||r.status);return j}
+function flash(msg,ok){const f=$("flash");f.style.display="block";f.textContent=msg;
+ f.style.background=ok===false?"#7f1d1d":"#14532d";setTimeout(()=>f.style.display="none",4200)}
+function show(id){for(const s of["login","app"])$(s).style.display=s===id?"":"none"}
+async function login(){try{T=(await api("/admin/auth/login",{method:"POST",
+ body:JSON.stringify({username:$("u").value,password:$("p").value})})).access_token;
+ $("who").textContent=$("u").value;show("app");await refresh()}catch(e){if(e)flash(e.message||String(e),false)}}
+async function createSource(){try{const file=$("n_file").files[0];const meta={title:$("n_title").value,license_type:$("n_lic").value,author:$("n_author").value||undefined};
+ if(file){const fd=new FormData();fd.append("file",file);for(const[k,v]of Object.entries(meta))if(v!==undefined)fd.append(k,v);
+  await fetch(V1+"/admin/content/sources",{method:"POST",headers:{Authorization:"Bearer "+T},body:fd}).then(async r=>{if(!r.ok)throw Error(await r.text())})}
+ else await api("/admin/content/sources/paste",{method:"POST",body:JSON.stringify({...meta,text:$("n_text").value})});
+ flash("Source created — job queued");await refresh()}catch(e){if(e)flash(e.message,false)}}
+async function process(id){try{const r=await api(`/admin/content/sources/${id}/process`,{method:"POST",body:"{}"});
+ flash(`Job ${r.status}: ${JSON.stringify(r.stats||r.error||"").slice(0,140)}`);await refresh()}catch(e){if(e)flash(e.message,false)}}
+async function act(kind,id,verb,body){try{await api(`/admin/content/${kind}/${id}/${verb}`,{method:"POST",body:JSON.stringify(body||{})});
+ flash(verb+" ✓");await refresh()}catch(e){if(e)flash(e.message,false)}}
+async function refresh(){try{
+ const srcs=await api("/admin/content/sources");
+ $("sources").innerHTML="<table><tr><th>title</th><th>license</th><th>source</th><th>latest job</th><th></th></tr>"+
+  (srcs.map(s=>{const j=(s.jobs||[])[0]||{};return `<tr><td>${esc(s.title)}</td><td>${esc(s.license_type)}</td>
+   <td>${pill(s.status)}</td><td>${pill(j.status||"—")} <button class=ghost onclick="process('${s.id}')">run now</button></td>
+   <td style="color:var(--mut);font-size:12px">${esc(j.stage_note||"")}</td></tr>`}).join("")||"<tr><td colspan=5>none</td></tr>")+"</table>";
+ const ps=await api("/admin/content/proposals?status=human_review"),ps2=await api("/admin/content/proposals?status=ai_reviewed");
+ const rows=[...ps2,...ps];
+ $("proposals").innerHTML=rows.length?"<table><tr><th></th><th>draft</th><th>flags</th><th></th></tr>"+rows.map(p=>`<tr>
+  <td>${pill(p.status)}</td><td><b>${esc(p.action)}</b>${p.target_code?" → "+esc(p.target_code):""}<br>${esc(p.summary)}
+   <details><summary>payload / validation</summary><pre>${esc(JSON.stringify({payload:p.payload,validation:p.validation},null,1))}</pre></details></td>
+  <td>${((p.validation||{}).flags||[]).map(f=>`<div class=pill err>${esc(f.code)}</div>`).join("")||"<span style='color:var(--ok)'>clean</span>"}</td>
+  <td style="white-space:nowrap"><button onclick="act('proposals','${p.id}','approve',{notes:'via console'})">approve</button>
+   <button class=danger onclick="act('proposals','${p.id}','reject',{notes:'nope'})">reject</button><br>
+   ${p.status==="approved"?`<button onclick="act('proposals','${p.id}','publish',{notes:'via console'})">publish</button>`:""}</td></tr>`).join("")+"</table>"
+  :"<p style='color:var(--mut)'>nothing waiting</p>";
+ const cs=await api("/admin/content/conflicts");
+ $("conflicts").innerHTML=cs.length?cs.map(c=>`<p>${pill("open")} <b>${esc(c.topic)}</b><br>${esc(c.description)}
+  <button class=ghost onclick="resolve('${c.id}')">mark resolved</button></p>`).join(""):
+  "<p style='color:var(--mut)'>no open conflicts</p>";
+ const us=await api("/admin/content/usage");
+ $("usage").innerHTML=`<p>${us.totals.calls} call(s) · ${us.totals.errors} error(s) · est. $${us.totals.estimated_cost_usd}
+  · provider <b>${us.totals.provider}</b> (${us.totals.model})</p>`;
+}catch(e){if(e)flash(e.message,false)}}
+async function resolve(id){await api(`/admin/content/conflicts/${id}`,{method:"PATCH",body:JSON.stringify({status:"resolved",notes:"resolved via console"})});flash("resolved");await refresh()}
+</script></body></html>

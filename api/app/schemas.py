@@ -339,6 +339,36 @@ class SubscriptionEventIn(Strict):
     store_receipt: str | None = Field(default=None, max_length=512)
 
 
+# --- Phase 5: receipt verification, tutor, support -------------------------
+
+
+class ReceiptIn(Strict):
+    store: str = Field(pattern=r"^(mock|google_play|app_store)$")
+    product_id: str = Field(min_length=2, max_length=80)
+    purchase_token: str = Field(min_length=8, max_length=512)
+    transaction_id: str | None = Field(default=None, max_length=140)
+
+
+class TutorIn(Strict):
+    message: str = Field(min_length=1, max_length=600)
+    # Parent-gate convenience flag: when the family turned free chat off the
+    # endpoint refuses at all (the refusal itself is server-side regardless).
+    open_chat_allowed: bool = True
+
+
+class SupportTicketIn(Strict):
+    subject: str = Field(min_length=3, max_length=140)
+    body: str = Field(min_length=10, max_length=8000)
+    locale: str = Field(default="en", max_length=16)
+    app_version: str = Field(default="", max_length=20)
+    platform: str = Field(default="", max_length=20)
+
+
+class SupportTicketPatch(Strict):
+    status: str = Field(pattern=r"^(open|in_progress|resolved|closed)$")
+    admin_reply: str | None = Field(default=None, max_length=4000)
+
+
 class AdminLoginIn(Strict):
     username: str = Field(min_length=2, max_length=60)
     password: str = Field(min_length=1, max_length=128)
@@ -401,3 +431,166 @@ class RecommendationOut(BaseModel):
     lesson_title: str | None = None
     module_title: str | None = None
     reviews: list[ReviewItemOut] = Field(default_factory=list)
+
+
+# --------------------------- Phase 4: content intelligence ----------------
+
+class DocumentOut(BaseModel):
+    id: UUID
+    kind: str
+    filename: str
+    media_type: str | None = None
+    byte_size: int
+    sha256: str
+    page_count: int | None = None
+    extraction_backend: str | None = None
+    extraction_status: str
+    language_detected: str | None = None
+    notes: str | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class JobOut(BaseModel):
+    id: UUID
+    source_id: UUID
+    job_type: str
+    status: str
+    stage_note: str | None = None
+    attempts: int
+    max_attempts: int
+    error: str | None = None
+    stats: dict | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SourceOut(BaseModel):
+    id: UUID
+    title: str
+    author: str | None = None
+    publisher: str | None = None
+    description: str | None = None
+    category: str
+    target_age_min: int | None = None
+    target_age_max: int | None = None
+    target_level_key: str | None = None
+    language: str
+    license_type: str
+    license_notes: str | None = None
+    status: str
+    created_at: datetime
+    documents: list[DocumentOut] = Field(default_factory=list)
+    jobs: list[JobOut] = Field(default_factory=list)
+
+
+class SourceMeta(Strict):
+    title: str = Field(min_length=2, max_length=200)
+    author: str | None = Field(default=None, max_length=160)
+    publisher: str | None = Field(default=None, max_length=160)
+    description: str | None = Field(default=None, max_length=2000)
+    category: str = Field(default="phonics", pattern=r"^[a-z][a-z0-9-]{0,39}$")
+    target_age_min: int | None = Field(default=None, ge=2, le=18)
+    target_age_max: int | None = Field(default=None, ge=2, le=18)
+    target_level_key: str | None = Field(default=None, max_length=30)
+    language: str = Field(default="en", pattern=r"^[a-z]{2}(-[A-Z]{2})?$")
+    license_type: str = Field(
+        pattern=r"^(self_owned|licensed|public_domain|permission_granted|unknown)$")
+    license_notes: str | None = Field(default=None, max_length=2000)
+
+
+class PasteIn(SourceMeta):
+    text: str = Field(min_length=120, max_length=400_000)
+
+
+class UrlIn(SourceMeta):
+    url: str = Field(min_length=8, max_length=2048)
+    max_bytes: int = Field(default=4_000_000, ge=1_024, le=25_000_000)
+
+
+class KnowledgeOut(BaseModel):
+    id: UUID
+    source_id: UUID
+    category: str
+    title: str
+    body: str
+    topic_key: str | None = None
+    skill_key: str | None = None
+    confidence: float
+    provenance: str
+    status: str
+    ai_model: str | None = None
+    created_at: datetime
+    evidence: list[dict] = Field(default_factory=list)
+
+
+class ProposalOut(BaseModel):
+    id: UUID
+    source_id: UUID | None = None
+    job_id: UUID | None = None
+    action: str
+    status: str
+    target_entity_type: str | None = None
+    target_entity_id: UUID | None = None
+    target_code: str | None = None
+    summary: str | None = None
+    ai_model: str | None = None
+    edit_count: int
+    validation: dict | None = None
+    created_at: datetime
+    approved_at: datetime | None = None
+    published_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProposalDetailOut(ProposalOut):
+    payload: dict
+    knowledge_item_ids: list = Field(default_factory=list)
+    reviews: list[dict] = Field(default_factory=list)
+    side_by_side: dict | None = None
+    license: str | None = None
+
+
+class ProposalEditIn(Strict):
+    payload: dict | None = None
+    summary: str | None = Field(default=None, max_length=110)
+    target_code: str | None = Field(default=None, max_length=60)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class ReviewActionIn(Strict):
+    notes: str | None = Field(default=None, max_length=2000)
+    force: bool = False
+
+
+class ConflictOut(BaseModel):
+    id: UUID
+    topic: str
+    description: str
+    knowledge_a_id: UUID | None = None
+    knowledge_b_id: UUID | None = None
+    recommended_action: str
+    status: str
+    resolution_notes: str | None = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ConflictResolveIn(Strict):
+    status: str = Field(pattern=r"^(resolved|dismissed)$")
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class CopilotIn(Strict):
+    prompt: str = Field(min_length=4, max_length=800)
+
+
+class CopilotOut(BaseModel):
+    reply: str
+    report: dict
+    proposals: list[str] = Field(default_factory=list)

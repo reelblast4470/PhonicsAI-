@@ -754,6 +754,14 @@ class ContentVersion(TimestampMixin, Base):
     created_by_admin_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("admin_users.id", ondelete="SET NULL")
     )
+    # --- Phase 4 provenance (additive): who/why/what produced this version.
+    origin: Mapped[str] = mapped_column(String(20), nullable=False,
+                                         default="manual")  # seed|manual|ai_pipeline|rollback
+    proposal_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("content_proposals.id", ondelete="SET NULL"))
+    change_reason: Mapped[str | None] = mapped_column(Text)
+    snapshot_state: Mapped[str] = mapped_column(String(10), nullable=False,
+                                                default="after")  # before|after
     __table_args__ = (UniqueConstraint("entity_type", "entity_id", "version"),)
 
 
@@ -786,3 +794,373 @@ class AdminAuditLog(TimestampMixin, Base):
     before: Mapped[dict | None] = mapped_column(Jsonb)
     after: Mapped[dict | None] = mapped_column(Jsonb)
     ip_hash: Mapped[str | None] = mapped_column(String(64))
+
+
+# ===========================================================================
+# Phase 4 — AI content-intelligence pipeline (admin realm only)
+#
+# Invariant, encoded in the schema: AI output is *draft* until a human
+# approves it, and publishing never overwrites without a snapshot.
+#   content_sources → source_documents → source_chunks
+#       → knowledge_items (↔ knowledge_sources for provenance refs)
+#       → content_proposals (workflow) → content_versions (already existing,
+#         extended with provenance columns) and content_conflicts.
+# ai_processing_jobs drives the async pipeline; ai_usage_logs the cost
+# telemetry. No learner data, no public routes: everything hangs off the
+# admin realm.
+# ===========================================================================
+
+KNOWLEDGE_CATEGORIES = (
+    "phonics_rule", "reading_strategy", "vocabulary", "pronunciation",
+    "spelling", "comprehension", "memory_technique", "study_technique",
+    "teaching_method", "learning_principle", "assessment_method",
+    "activity_idea",
+)
+
+
+class ContentSource(TimestampMixin, Base):
+    """A registered educational resource. License is mandatory metadata:
+    an upload is *never* assumed to be reusable — 'unknown' blocks nothing
+    from analysis but the review UI always shows the licence to a human."""
+
+    __tablename__ = "content_sources"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    author: Mapped[str | None] = mapped_column(String(160))
+    publisher: Mapped[str | None] = mapped_column(String(160))
+    description: Mapped[str | None] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(String(40), nullable=False, default="phonics")
+    target_age_min: Mapped[int | None] = mapped_column(Integer)
+    target_age_max: Mapped[int | None] = mapped_column(Integer)
+    target_level_key: Mapped[str | None] = mapped_column(String(30))
+    language: Mapped[str] = mapped_column(String(8), nullable=False, default="en")
+    license_type: Mapped[str] = mapped_column(String(24), nullable=False)
+    license_notes: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="intake")
+    added_by_admin_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="SET NULL")
+    )
+    __table_args__ = (
+        CheckConstraint(
+            "license_type IN ('self_owned','licensed','public_domain',"
+            "'permission_granted','unknown')", name="ck_source_license"),
+        CheckConstraint(
+            "status IN ('intake','processing','processed','needs_review','failed')",
+            name="ck_source_status"),
+    )
+
+
+class SourceDocument(TimestampMixin, Base):
+    """The stored file (or pasted text) behind a source. Files live outside
+    the web root; only the admin download route can reach them."""
+
+    __tablename__ = "source_documents"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("content_sources.id", ondelete="CASCADE"), index=True, nullable=False)
+    kind: Mapped[str] = mapped_column(String(12), nullable=False)  # file|paste|url
+    filename: Mapped[str] = mapped_column(String(200), nullable=False)
+    media_type: Mapped[str | None] = mapped_column(String(80))
+    byte_size: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    storage_path: Mapped[str] = mapped_column(String(300), nullable=False)
+    page_count: Mapped[int | None] = mapped_column(Integer)
+    extraction_backend: Mapped[str | None] = mapped_column(String(40))
+    extraction_status: Mapped[str] = mapped_column(String(16), nullable=False,
+                                                     default="pending")  # pending|ok|ocr_needed|failed
+    language_detected: Mapped[str | None] = mapped_column(String(8))
+    notes: Mapped[str | None] = mapped_column(Text)
+    __table_args__ = (
+        CheckConstraint("kind IN ('file','paste','url')", name="ck_document_kind"),
+        CheckConstraint(
+            "extraction_status IN ('pending','ok','ocr_needed','failed')",
+            name="ck_document_extraction"),
+    )
+
+
+class SourceChunk(TimestampMixin, Base):
+    """A retrieval unit: chunked text with page/chapter refs and (optional)
+    embeddings. Embeddings are plain JSONB vectors — swap-in point for
+    pgvector; retrieval quality must never depend on them being present."""
+
+    __tablename__ = "source_chunks"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("source_documents.id", ondelete="CASCADE"), index=True, nullable=False)
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    page_start: Mapped[int | None] = mapped_column(Integer)
+    page_end: Mapped[int | None] = mapped_column(Integer)
+    chapter_ref: Mapped[str | None] = mapped_column(String(160))
+    token_estimate: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    embedding: Mapped[list | None] = mapped_column(Jsonb)
+    embedding_model: Mapped[str | None] = mapped_column(String(60))
+    __table_args__ = (UniqueConstraint("document_id", "position"),)
+
+
+class AiProcessingJob(TimestampMixin, Base):
+    """Background pipeline state. Status advances stage-by-stage so the admin
+    UI can show progress; failures keep the error text for safe retry."""
+
+    __tablename__ = "ai_processing_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("content_sources.id", ondelete="CASCADE"), index=True, nullable=False)
+    job_type: Mapped[str] = mapped_column(String(30), nullable=False,
+                                          default="process_document")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued")
+    stage_note: Mapped[str | None] = mapped_column(String(200))
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    error: Mapped[str | None] = mapped_column(Text)
+    stats: Mapped[dict | None] = mapped_column(Jsonb, default=dict)
+    requested_by_admin_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="SET NULL"))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued','extracting','chunking','analyzing','mapping',"
+            "'generating','validating','needs_review','completed','failed')",
+            name="ck_job_status"),
+        Index("ix_jobs_claim", "status", postgresql_where=text("status = 'queued'")),
+    )
+
+
+class KnowledgeItem(TimestampMixin, Base):
+    """One extracted, classified insight with provenance. content_hash makes
+    duplicates detectable without fuzzy matching; provenance separates a
+    source fact from AI interpretation — never blended."""
+
+    __tablename__ = "knowledge_items"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("content_sources.id", ondelete="CASCADE"), index=True, nullable=False)
+    category: Mapped[str] = mapped_column(String(24), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    skill_key: Mapped[str | None] = mapped_column(String(40))
+    topic_key: Mapped[str | None] = mapped_column(String(60))   # e.g. 'sh', 'silent-e'
+    target_age_min: Mapped[int | None] = mapped_column(Integer)
+    target_age_max: Mapped[int | None] = mapped_column(Integer)
+    target_level_key: Mapped[str | None] = mapped_column(String(30))
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    provenance: Mapped[str] = mapped_column(String(20), nullable=False,
+                                            default="source_fact")  # |ai_interpretation
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="new")
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    ai_model: Mapped[str | None] = mapped_column(String(80))
+    # structured claim e.g. {"grapheme": "sh", "phoneme": "/ʃ/"} — lets the
+    # conflict detector compare assertions ACROSS sources, not per document.
+    claim: Mapped[dict | None] = mapped_column(Jsonb)
+    __table_args__ = (
+        CheckConstraint(
+            "category IN ('phonics_rule','reading_strategy','vocabulary',"
+            "'pronunciation','spelling','comprehension','memory_technique',"
+            "'study_technique','teaching_method','learning_principle',"
+            "'assessment_method','activity_idea')", name="ck_knowledge_category"),
+        CheckConstraint(
+            "provenance IN ('source_fact','ai_interpretation','ai_example')",
+            name="ck_knowledge_provenance"),
+        CheckConstraint("status IN ('new','mapped','conflict','discarded')",
+                        name="ck_knowledge_status"),
+        UniqueConstraint("source_id", "content_hash", name="uq_knowledge_dedup"),
+    )
+
+
+class KnowledgeSource(TimestampMixin, Base):
+    """Provenance link: which chunk/page/snippet backs a knowledge item."""
+
+    __tablename__ = "knowledge_sources"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    knowledge_item_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_items.id", ondelete="CASCADE"), index=True, nullable=False)
+    document_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("source_documents.id", ondelete="SET NULL"))
+    chunk_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("source_chunks.id", ondelete="SET NULL"))
+    page_ref: Mapped[int | None] = mapped_column(Integer)
+    chapter_ref: Mapped[str | None] = mapped_column(String(160))
+    snippet: Mapped[str | None] = mapped_column(Text)  # short quote for review UI
+
+
+class ContentProposal(TimestampMixin, Base):
+    """An AI-drafted change to the curriculum, always human-gated.
+    Workflow: draft → ai_reviewed → human_review → approved → published
+    (or rejected / rolled_back). Publishing goes through publish.py, which
+    snapshots before mutating — this table never holds live content."""
+
+    __tablename__ = "content_proposals"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    source_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("content_sources.id", ondelete="SET NULL"), index=True)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("ai_processing_jobs.id", ondelete="SET NULL"))
+    knowledge_item_ids: Mapped[list | None] = mapped_column(Jsonb, default=list)
+    action: Mapped[str] = mapped_column(String(24), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="draft")
+    target_entity_type: Mapped[str | None] = mapped_column(String(20))  # lesson|module
+    target_entity_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    target_code: Mapped[str | None] = mapped_column(String(60))   # stable lesson code
+    summary: Mapped[str | None] = mapped_column(Text)             # what/why, for review
+    payload: Mapped[dict] = mapped_column(Jsonb, nullable=False, default=dict)
+    validation: Mapped[dict | None] = mapped_column(Jsonb)        # {passed, flags[]}
+    ai_model: Mapped[str | None] = mapped_column(String(80))
+    edit_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_by_admin_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="SET NULL"))
+    approved_by_admin_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="SET NULL"))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('new_lesson','improve_lesson','new_questions',"
+            "'new_pattern','curriculum_gap')", name="ck_proposal_action"),
+        CheckConstraint(
+            "status IN ('draft','ai_reviewed','human_review','approved',"
+            "'rejected','published','rolled_back')", name="ck_proposal_status"),
+    )
+
+
+class ContentReview(TimestampMixin, Base):
+    """Append-only review decisions and edit notes on proposals."""
+
+    __tablename__ = "content_reviews"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    proposal_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("content_proposals.id", ondelete="CASCADE"), index=True, nullable=False)
+    admin_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="SET NULL"))
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    __table_args__ = (
+        CheckConstraint("action IN ('edited','approved','rejected','regenerated',"
+                        "'published','rolled_back')", name="ck_review_action"),
+    )
+
+
+class ContentConflict(TimestampMixin, Base):
+    """Two sources that disagree. The system MUST NOT auto-choose — a human
+    resolves with notes; the losing knowledge can be discarded afterwards."""
+
+    __tablename__ = "content_conflicts"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    topic: Mapped[str] = mapped_column(String(80), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    knowledge_a_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("knowledge_items.id", ondelete="CASCADE"))
+    knowledge_b_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("knowledge_items.id", ondelete="CASCADE"))
+    recommended_action: Mapped[str] = mapped_column(
+        String(120), nullable=False, default="human review required")
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="open")
+    resolution_notes: Mapped[str | None] = mapped_column(Text)
+    __table_args__ = (
+        CheckConstraint("status IN ('open','resolved','dismissed')",
+                        name="ck_conflict_status"),
+    )
+
+
+class SupportTicket(TimestampMixin, Base):
+    """Adult-written support intake. By contract carries NO learner data:
+    subject/body from a grown-up, locale/app metadata only. Free text here is
+    deliberate (support can't work otherwise) and stays parent-scoped."""
+
+    __tablename__ = "support_tickets"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    subject: Mapped[str] = mapped_column(String(140), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    locale: Mapped[str] = mapped_column(String(16), nullable=False, default="en")
+    app_version: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    platform: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
+    admin_reply: Mapped[str | None] = mapped_column(Text)
+    answered_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="SET NULL"))
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('open','in_progress','resolved','closed')",
+            name="ck_ticket_status"),
+    )
+
+
+class TutorExchange(TimestampMixin, Base):
+    """One question + answer of the AI tutor, kept for safety review and the
+    parent's 'redirected N times' count. 30-day retention is a deploy
+    responsibility (delete old rows in a scheduled sweep); the app itself
+    never reads ancient rows."""
+
+    __tablename__ = "tutor_exchanges"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    learner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("learner_profiles.id", ondelete="CASCADE"), index=True, nullable=False)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+    chips: Mapped[list | None] = mapped_column(Jsonb, default=list)
+    action: Mapped[dict | None] = mapped_column(Jsonb)
+    flagged: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    provider: Mapped[str] = mapped_column(String(20), nullable=False, default="mock")
+    model: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+
+
+class VerifiedReceipt(TimestampMixin, Base):
+    """Store receipts the SERVER confirmed, one row per store transaction,
+    ever. The unique (store, transaction_id) is the replay lock that makes a
+    stolen/reused token unable to grant a second entitlement."""
+
+    __tablename__ = "verified_receipts"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    store: Mapped[str] = mapped_column(String(16), nullable=False)
+    product_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    transaction_id: Mapped[str] = mapped_column(String(140), nullable=False)
+    plan_key: Mapped[str] = mapped_column(String(40), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    raw: Mapped[dict | None] = mapped_column(Jsonb, default=dict)
+    __table_args__ = (
+        UniqueConstraint("store", "transaction_id"),
+        CheckConstraint("store IN ('mock','google_play','app_store')",
+                        name="ck_receipt_store"),
+    )
+
+
+class AiUsageLog(TimestampMixin, Base):
+    """Telemetry for every provider call (including 'mock', so counts are
+    honest). Estimated cost only — never billing-grade."""
+
+    __tablename__ = "ai_usage_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    provider: Mapped[str] = mapped_column(String(20), nullable=False)
+    model: Mapped[str] = mapped_column(String(80), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(30), nullable=False)
+    job_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("ai_processing_jobs.id", ondelete="SET NULL"), index=True)
+    admin_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="SET NULL"))
+    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    estimated_cost_usd: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[str] = mapped_column(String(12), nullable=False, default="ok")
+    error: Mapped[str | None] = mapped_column(Text)
+    __table_args__ = (
+        CheckConstraint("status IN ('ok','error')", name="ck_usage_status"),
+    )

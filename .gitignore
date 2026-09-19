@@ -52,4 +52,5 @@ api/.venv
 **/__pycache__/
 **/.pytest_cache/
 api/data/outbox/
+api/data/uploads/
 **/.mypy_cache/

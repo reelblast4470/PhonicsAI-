@@ -21,6 +21,9 @@ import 'package:phonicsai/core/storage/key_value_store.dart';
 import 'package:phonicsai/features/assessment/data/assessment_remote.dart';
 import 'package:phonicsai/features/auth/data/http_auth_repository.dart';
 import 'package:phonicsai/features/progress/data/backend_progress_sync.dart';
+import 'package:phonicsai/features/settings/application/support_service.dart';
+import 'package:phonicsai/features/tutor/data/api_tutor_service.dart';
+import 'package:phonicsai/features/tutor/domain/tutor_service.dart';
 
 final base = Platform.environment['PHONICS_LIVE_BASE'] ?? '';
 
@@ -200,5 +203,66 @@ void main() {
     expect(deleted.isOk, isTrue, reason: '${deleted.failureOrNull?.detail}');
     final afterDelete = await auth.signIn(email: email, password: password);
     expect(afterDelete.isFailure, isTrue); // and it must
+  }, skip: skip);
+
+  test('phase-5 seams: tutor endpoint, receipt verification, support queue',
+      () async {
+    final email = 'flutter-live5-${DateTime.now().microsecondsSinceEpoch}@mail.phonics.dev';
+    const password = 'Str0ngPassphrase!42';
+    final signUp = await auth.signUp(
+      email: email, password: password, displayName: 'Live Tester',
+    );
+    expect(signUp.isOk, isTrue, reason: '${signUp.failureOrNull?.detail}');
+
+    final learner = await api.postJson('/learners', body: {
+      'display_name': 'Iris',
+      'daily_target_minutes': 15,
+    });
+    final learnerId = learner['id'] as String;
+
+    // Tutor: the adapter sends only the question — context is built server-side.
+    final tutor = ApiTutorService(api: api, learnerId: learnerId);
+    const ctx = TutorContext(
+      learnerName: 'Iris',
+      ageYears: 6,
+      levelLabel: 'Sounds & symbols',
+      recentPhonemes: [],
+      strugglingPhonemes: ['sh'],
+    );
+    final reply = await tutor.reply(message: 'how do I blend?', context: ctx);
+    expect(reply.isOk, isTrue, reason: '${reply.failureOrNull?.detail}');
+    expect(reply.requireValue.text.toLowerCase(), contains('blend'));
+    final starters = await tutor.suggestedStarters(ctx);
+    expect(starters.requireValue, isNotEmpty);
+
+    // The server counts the free quota (3/day) — not the client.
+    for (var i = 0; i < 2; i++) {
+      expect((await tutor.reply(message: 'hello again $i', context: ctx)).isOk,
+          isTrue);
+    }
+    final overQuota = await tutor.reply(message: 'fourth one', context: ctx);
+    expect(overQuota.isFailure, isTrue); // tutor_quota_exceeded
+
+    // A server-verified receipt lifts the quota; the token decides nothing.
+    final verified = await api.postJson('/subscriptions/me/receipt', body: {
+      'store': 'mock',
+      'product_id': 'plus_lifetime',
+      'purchase_token': 'mock-token-live-contract-1',
+    });
+    expect(verified['verified'], isTrue);
+    final me = await api.getJson('/subscriptions/me');
+    expect(me['status'], 'active');
+    expect((await tutor.reply(message: 'plus now works', context: ctx)).isOk,
+        isTrue);
+
+    // Support intake: adult-authored, parent-visible.
+    final sent = await ApiSupportService(api).send(
+      subject: 'Live contract check',
+      body: 'Testing the intake queue end to end.',
+      locale: 'en',
+    );
+    expect(sent.isOk, isTrue, reason: '${sent.failureOrNull?.detail}');
+    final tickets = await api.getJson('/support/tickets');
+    expect(((tickets['tickets'] as List).first)['status'], 'open');
   }, skip: skip);
 }

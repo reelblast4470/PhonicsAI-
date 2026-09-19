@@ -300,3 +300,101 @@ Defects the tests caught: client crashed on real assessment payloads (missing
 id RangeError on short ids; provider reads in onDispose during teardown
 (Bad state — captured at build); runner `copyWith` silently dropping the
 reveal map (tests found the key never highlighted).
+
+## Phase 4 — AI content-intelligence pipeline (`api/`)
+
+The administrator-facing learning loop for *content itself*:
+SOURCE → EXTRACT → ANALYZE → MAP TO CURRICULUM → GENERATE DRAFT → VALIDATE →
+(human) REVIEW → APPROVE → PUBLISH → VERSION.
+
+Backend (`api/app/ingestion/`): pluggable file intake (PDF/DOCX/EPUB/TXT/
+images + paste + URL) with magic-byte validation, size caps and zip-bomb
+guard; stdlib text extractors with honest `ocr_needed` flagging (optional
+`OCR_COMMAND` hook); page/chapter-preserving 500–1000-token chunking with
+per-job budget; `AIService` abstraction (`mock` rules engine default, Gemini
+and OpenAI-compatible JSON providers behind env keys) doing extraction,
+classification (12 categories), curriculum mapping and draft generation;
+cross-source **conflict reports** (never auto-resolved); deterministic
+quality gate (answer-key validity, duplicate detection incl. within-batch,
+unsafe/ambiguous/age checks, verbatim-copyright guard ≥20 words,
+confidence floor); retrieval over chunks (provider embeddings when present,
+hashed-BoW embeddings from the mock so search works offline).
+
+DB: +9 tables (`content_sources`, `source_documents`, `source_chunks`,
+`ai_processing_jobs`, `knowledge_items`, `knowledge_sources`,
+`content_proposals`, `content_reviews`, `content_conflicts`, `ai_usage_logs`)
+and provenance columns on the existing `content_versions` — no duplicate
+content trees; publishing writes real `lessons/lesson_steps/questions/answers`
+rows the learner API already serves, and the client's cached curriculum
+busts automatically via the version hash. 46 tables, migration
+`eaad312c50de` (additive, reversible).
+
+Workflow/authorization: admin realm only; `support` role read-only; every
+mutation audited; source bytes downloadable only by admins and physically
+removed on source delete. Publish = snapshot-before + snapshot-after version
+pairs → exact rollback (new lessons are hard-removed on rollback). Background
+jobs run via `python -m app.worker` (FOR UPDATE SKIP LOCKED claim + atomic
+status flip — double-run is refused, not corrupted); failed jobs retry.
+
+Cost/telemetry: every provider call logs provider/model/purpose/tokens/
+latency/estimated USD (mock included); `/admin/content/usage` aggregates it.
+
+Admin surface: `/api/v1/admin/content/*` (sources CRUD, jobs, knowledge,
+proposals incl. edit/approve/reject/regenerate/publish/rollback, conflicts,
+versions, usage, copilot, search) + a zero-dependency dev console at
+`/admin-ui` (never mounted in production).
+
+Verified: pytest **84/84** (33 new Phase-4 tests: upload validation incl.
+zip-bomb/size/magic-bytes, docx/epub/pdf extraction with page refs, token
+bounds, knowledge classification + provenance, in-run dedupe, cross-source
+conflict gating, verbatim guard blocking approval, provider failure → retry
+recovery, single-runner claim, full approve→publish→**learner receives the
+updated lesson through the public API**→rollback-identical flow, copilot
+reports/drafts, role and token isolation checks, audit rows, usage metering);
+alembic upgrade→downgrade→upgrade clean; `flutter` side untouched by design
+(curriculum content flows through the existing live-mode adapters).
+
+## Phase 5 — the last marked seams: tutor endpoint, receipts, support queue
+
+Three items were carried on the open list since Phase 1 with explicit
+`// open:` / `TODO(backend)` markers; all three are now closed on both sides
+of the wire (+3 tables, migration `1100e928bded`, 46→49 total):
+
+* **Tutor** — `routers/tutor.py`: learner-scoped `POST /reply` (SSE default,
+  `?sse=false` JSON) + `GET /starters` + `GET /exchanges`. Server-built
+  child context (no PII in the request body), blocked-topic pre-filter,
+  off-topic replies *flagged and stored* (`tutor_exchanges`) for the parent
+  report + `/admin/tutor/exchanges` review view; free-quota per UTC day
+  enforced server-side, lifted only by a verified subscription. Tutor answers
+  flow through the Phase-4 `AIService` abstraction → every provider call
+  (mock included) metered in `ai_usage_logs`, purpose `tutor`. Client:
+  `ApiTutorService` auto-swaps in behind profile binding; `PhonicsRuleTutor`
+  stays the honest offline/dev answer.
+* **Receipts** — `app/billing.py`: `POST /subscriptions/me/receipt` is the
+  *only* entitlement-flipping path. Verifiers: `mock` (dev/test, boot-refused
+  in production), `google_play` (androidpublisher REST), `app_store`
+  (verifyReceipt + sandbox fallback), `off`. Canceled/pending/refunded
+  purchase states map to honest 400s. `verified_receipts` unique
+  (store, transaction_id) = replay lock; cross-account reuse → 409. Client:
+  `SubscriptionController` verifies with the server first, *stays free* when
+  the server refuses, falls back to the local conservative rule only when
+  the network (not the store) is the problem, and `refresh()` now re-adopts
+  server truth (revocations land). `purchase()` refuses to say "Unlocked"
+  when the entitlement didn't actually flip.
+* **Support** — `routers/support.py`: the `/support/tickets` path the app's
+  `ApiSupportService` already targeted, plus the admin queue, `support`-role
+  reply rights *in this domain only*, parent notification on reply, every
+  mutation audited (`support.update`).
+
+Verified: pytest **104/104** (20 new: idempotent verification, replay lock,
+failure tokens, lifetime-without-expiry, store-product mapping, off/mismatch
+modes, production-boot refusal, SSE token reassembly == final text, flagging,
+quota-then-unlock, chat-disabled, 404-not-403 isolation, struggling-sound
+starters, admin review view, support loop incl. notification + audit rows,
+support-role domain split). Contract test gained a Phase-5 journey (tutor
+quota across the wire → receipt → unlocked → support post). Alembic
+upgrade→downgrade→upgrade clean. NOTE: this sandbox has no Flutter SDK and
+pub.dev is unreachable, so client edits were syntax/brace-verified and
+pattern-checked against existing adapters, but `flutter analyze`/`flutter
+test` must run in CI before merge — the mock-config defaults keep all local
+test paths behavior-identical.
