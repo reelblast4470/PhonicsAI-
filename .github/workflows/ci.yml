@@ -145,9 +145,14 @@ jobs:
           cache: true
       - run: flutter pub get
       - name: Live contract test
-        run: flutter test test/live/live_backend_contract_test.dart
-        env:
-          PHONICS_LIVE_BASE: http://127.0.0.1:8099/api/v1
+        run: |
+          flutter test test/live/live_backend_contract_test.dart 2>&1 | tee /tmp/live.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" != "0" ]; then
+            printf '::error::live test failed: %s\n' \
+              "$(grep -E 'Expected|Actual|failed|Error|EXCEPTION|Exception' /tmp/live.log | head -30 | tr '\n' '~' | tr '"%' '  ')"
+            exit "$status"
+          fi
       - name: API log on failure
         if: failure()
         run: cat /tmp/api.log
