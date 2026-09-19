@@ -18,7 +18,7 @@ jobs:
         image: postgres:17
         env:
           POSTGRES_USER: phonicsai
-          POSTGRES_PASSWORD: devloc…cret
+          POSTGRES_PASSWORD: devlocal_only_not_a_secret
           POSTGRES_DB: phonicsai_test
         ports: ['5432:5432']
         options: >-
@@ -39,7 +39,7 @@ jobs:
       - run: pip install -r requirements.txt
       - name: Migrate a clean database + guard model/migration drift
         env:
-          PG_ADMIN: "postgresql://phonicsai:devloc…cret@127.0.0.1:5432/postgres"
+          PG_ADMIN: "postgresql://phonicsai:devlocal_only_not_a_secret@127.0.0.1:5432/postgres"
           DATABASE_URL: "postgresql+asyncpg://phonicsai:devlocal_only_not_a_secret@127.0.0.1:5432/phonicsai_ci"
         run: |
           {
@@ -119,7 +119,7 @@ jobs:
         image: postgres:17
         env:
           POSTGRES_USER: phonicsai
-          POSTGRES_PASSWORD: devloc…cret
+          POSTGRES_PASSWORD: devlocal_only_not_a_secret
           POSTGRES_DB: phonicsai_live
         ports: ['5432:5432']
         options: >-
