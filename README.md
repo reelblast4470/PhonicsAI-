@@ -3,7 +3,10 @@
 A production-architecture Flutter client for a kids' phonics learning app with an
 AI tutor: **Android, iOS, Windows, and responsive web**, for readers aged 3–10.
 
-> **Status:** all 22 screens are implemented with real interaction logic. Every
+> **Status:** all 22 screens are implemented with real interaction logic. Backend
+> Phase 4 (AI content-intelligence pipeline: source ingestion → knowledge →
+> curriculum-mapped draft proposals → human approval → versioned publishing)
+> is live in `api/`. Every
 > external system (auth, database, AI, speech, payments, notifications) sits
 > behind a clean interface with a clearly-labelled mock/offline adapter —
 > nothing is faked as if it were real. See [Integration readiness](#integration-readiness).
@@ -168,9 +171,13 @@ The client is complete and tested; deploying it "for real" still needs, in order
 
 1. **Backend**: auth, learners, content, progress, daily tasks, assessments,
    analytics, feedback, admin + audit and account-deletion cascade are built
-   and tested in `api/` (41 API tests + a live Flutter↔FastAPI contract test).
+   and tested in `api/` (84 API tests + a live Flutter↔FastAPI contract test),
+   together with the Phase-3 real curriculum/adaptive loop and the Phase-4
+   AI content pipeline (upload → extract → map → draft → validate → human
+   approval → versioned publish, `/admin/content/*` + worker).
    Still open: tutor SSE context endpoint, server-side store receipt
-   verification, support intake queueing, lesson-id content mapping (Phase 3).
+   verification, support intake queueing, a production admin dashboard UI
+   (the dev console at `/admin-ui` is the reference implementation).
 2. **Release signing**: keystore + `android/key.properties` (git-ignored by
    design), Play App Signing recommended; iOS cert/profile via Xcode.
 3. **Store material**: replace the generated launcher icons (all densities),

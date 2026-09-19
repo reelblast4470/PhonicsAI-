@@ -8,8 +8,11 @@ additive, non-breaking move.
 import logging
 import time
 
+from pathlib import Path
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from slowapi import Limiter
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
@@ -21,6 +24,7 @@ from .errors import install_error_handlers
 from .limiter import limiter as shared_limiter
 from .routers import (
     admin,
+    admin_content,
     analytics_api,
     assessments,
     auth,
@@ -79,6 +83,15 @@ def create_app() -> FastAPI:
         app.include_router(r, prefix=prefix)
     # admin is mounted under its own guard; user tokens can never reach it
     app.include_router(admin.router, prefix=prefix)
+    app.include_router(admin_content.router, prefix=prefix)
+
+    # dev/staging admin console for the Phase-4 pipeline (a thin reference UI
+    # over /api/v1/admin/content/*; never mounted in production)
+    if settings.environment != "production":
+        app.mount(
+            "/admin-ui",
+            StaticFiles(directory=Path(__file__).parent / "static", html=True),
+            name="admin-ui")
 
     @app.get("/healthz", tags=["ops"])
     async def healthz() -> dict:

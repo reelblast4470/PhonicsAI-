@@ -300,3 +300,56 @@ Defects the tests caught: client crashed on real assessment payloads (missing
 id RangeError on short ids; provider reads in onDispose during teardown
 (Bad state — captured at build); runner `copyWith` silently dropping the
 reveal map (tests found the key never highlighted).
+
+## Phase 4 — AI content-intelligence pipeline (`api/`)
+
+The administrator-facing learning loop for *content itself*:
+SOURCE → EXTRACT → ANALYZE → MAP TO CURRICULUM → GENERATE DRAFT → VALIDATE →
+(human) REVIEW → APPROVE → PUBLISH → VERSION.
+
+Backend (`api/app/ingestion/`): pluggable file intake (PDF/DOCX/EPUB/TXT/
+images + paste + URL) with magic-byte validation, size caps and zip-bomb
+guard; stdlib text extractors with honest `ocr_needed` flagging (optional
+`OCR_COMMAND` hook); page/chapter-preserving 500–1000-token chunking with
+per-job budget; `AIService` abstraction (`mock` rules engine default, Gemini
+and OpenAI-compatible JSON providers behind env keys) doing extraction,
+classification (12 categories), curriculum mapping and draft generation;
+cross-source **conflict reports** (never auto-resolved); deterministic
+quality gate (answer-key validity, duplicate detection incl. within-batch,
+unsafe/ambiguous/age checks, verbatim-copyright guard ≥20 words,
+confidence floor); retrieval over chunks (provider embeddings when present,
+hashed-BoW embeddings from the mock so search works offline).
+
+DB: +9 tables (`content_sources`, `source_documents`, `source_chunks`,
+`ai_processing_jobs`, `knowledge_items`, `knowledge_sources`,
+`content_proposals`, `content_reviews`, `content_conflicts`, `ai_usage_logs`)
+and provenance columns on the existing `content_versions` — no duplicate
+content trees; publishing writes real `lessons/lesson_steps/questions/answers`
+rows the learner API already serves, and the client's cached curriculum
+busts automatically via the version hash. 46 tables, migration
+`eaad312c50de` (additive, reversible).
+
+Workflow/authorization: admin realm only; `support` role read-only; every
+mutation audited; source bytes downloadable only by admins and physically
+removed on source delete. Publish = snapshot-before + snapshot-after version
+pairs → exact rollback (new lessons are hard-removed on rollback). Background
+jobs run via `python -m app.worker` (FOR UPDATE SKIP LOCKED claim + atomic
+status flip — double-run is refused, not corrupted); failed jobs retry.
+
+Cost/telemetry: every provider call logs provider/model/purpose/tokens/
+latency/estimated USD (mock included); `/admin/content/usage` aggregates it.
+
+Admin surface: `/api/v1/admin/content/*` (sources CRUD, jobs, knowledge,
+proposals incl. edit/approve/reject/regenerate/publish/rollback, conflicts,
+versions, usage, copilot, search) + a zero-dependency dev console at
+`/admin-ui` (never mounted in production).
+
+Verified: pytest **84/84** (33 new Phase-4 tests: upload validation incl.
+zip-bomb/size/magic-bytes, docx/epub/pdf extraction with page refs, token
+bounds, knowledge classification + provenance, in-run dedupe, cross-source
+conflict gating, verbatim guard blocking approval, provider failure → retry
+recovery, single-runner claim, full approve→publish→**learner receives the
+updated lesson through the public API**→rollback-identical flow, copilot
+reports/drafts, role and token isolation checks, audit rows, usage metering);
+alembic upgrade→downgrade→upgrade clean; `flutter` side untouched by design
+(curriculum content flows through the existing live-mode adapters).

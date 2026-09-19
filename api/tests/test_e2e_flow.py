@@ -50,7 +50,7 @@ async def test_full_parent_and_learner_journey(client):
         r = await client.post(f"/api/v1/learners/{lid}/sessions/{sid}/events", json={
             "event_type": "lesson_step_completed",
             "payload": {"step": step["step_type"]},
-            "client_event_id": f"e2e-step-{step["position"]}",
+            "client_event_id": f"e2e-step-{step['position']}",
         }, headers=auth(ltok))
         assert r.status_code == 200
         if step["step_type"] == "practice" and step["questions"]:

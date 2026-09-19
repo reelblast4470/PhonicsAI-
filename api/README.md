@@ -10,7 +10,7 @@ app/
   main.py        create_app(): middleware (CORS, headers, limiter), routers
   config.py      env-driven Settings; refuses dev defaults when ENVIRONMENT=production
   db.py          async engine/session factory (SQLAlchemy 2.0, asyncpg)
-  models.py      37 tables: users/parents/learners, content tree, learning ledger,
+  models.py      46 tables: users/parents/learners, content tree, learning ledger,
                  SRS, daily tasks, achievements, assessments, feedback, billing,
                  notifications, admin + audit
   schemas.py     strict request models (extra="forbid") + response models
@@ -25,7 +25,13 @@ app/
   seed_data.py   small DEV phonics curriculum, origin='seed-dev'
   seed.py        `python -m app.seed` (catalog + optional dev admin)
 migrations/      Alembic (async env.py)  — `alembic revision --autogenerate`
-tests/           41 pytest tests incl. a full end-to-end journey test
+ingestion/       Phase-4 pipeline: extract → chunk → AI extract/map/draft →
+                 quality gate → proposals (drafts only; publishing is human)
+worker.py        `python -m app.worker` — queued-job processor (SKIP LOCKED
+                 claims, safe with N workers; --once drains the queue)
+tests/           84 pytest tests incl. a full end-to-end journey test and the
+                 Phase-4 acceptance suite (upload → publish → learner sees
+                 updated content → rollback)
 ```
 
 ## Quickstart (dev)
@@ -76,10 +82,14 @@ the event ledger — replay is neutralized by `client_event_id` dedupe.
 4. Replace the outbox mail adapter with SES/Postmark + SPF/DKIM.
 5. `alembic upgrade head` as a release step, before new code receives traffic
    (migrations are written additive-first: add column → backfill → drop).
-6. Remove the dev admin (`admin-dev`) or rotate it; wire the admin dashboard
-   (architecture prepared in `app/routers/admin.py`: login, user search/disable,
-   feedback triage, subscription grants, audit log, publish/unpublish — all
-   every mutation lands in `admin_audit_log`).
+6. Remove the dev admin (`admin-dev`) or rotate it. The admin surface
+   (`app/routers/admin.py` + `admin_content.py`) covers login, user search/
+   disable, feedback triage, subscription grants, publish/unpublish, audit log —
+   and the Phase-4 content-intelligence API (sources, jobs, knowledge,
+   proposals, conflicts, versions, usage, copilot). A minimal dev console is
+   served at `/admin-ui` (disabled in production); the real admin dashboard
+   builds on the same endpoints. Run the queue worker separately:
+   `python -m app.worker` (systemd unit, not a web dyno).
 7. Run under `gunicorn -k uvicorn.workers.UvicornWorker` or equivalent,
    2–4 workers; Postgres pool sized for 100k users on one beefy box first —
    the design scales vertically + read replicas before anything else.
@@ -117,7 +127,7 @@ Goal: an RPO of 24 h with plain dumps, ~5 min with WAL archiving; RTO < 1 h.
    ```bash
    createdb phonicsai_restore
    pg_restore -d phonicsai_restore /tmp/phonicsai_<ts>.dump
-   pg_dump phonicsai_restore | grep -c "CREATE TABLE"   # expect 37
+   pg_dump phonicsai_restore | grep -c "CREATE TABLE"   # expect 46
    ```
 
    Boot the app against the restored DB and run `pytest tests/test_e2e_flow.py`.
@@ -171,3 +181,45 @@ Goal: an RPO of 24 h with plain dumps, ~5 min with WAL archiving; RTO < 1 h.
   or verified receipts (`commerce.py`).
 * Rate limiting is per-process in-memory (multi-worker = multiplied budget);
   point `Limiter` at Redis storage before horizontal scaling.
+
+## Phase 4 — AI content-intelligence pipeline
+
+Admins upload educational resources (PDF/DOCX/EPUB/TXT, paste, or a plain-text
+URL) with mandatory title/author/age/level/language/**license** metadata. The
+pipeline: extract → chunk (500–1000 tokens, page/chapter refs kept) → AI
+knowledge extraction + classification (12 categories) → comparison against the
+live curriculum (duplicate / improve / missing / **conflict**) → draft proposals
+(lessons, questions, improvement diffs) → deterministic quality gate. Then it
+**stops**: proposals are `draft → ai_reviewed → human_review → approved →
+published`; only the human-triggered publish endpoint mutates curriculum, and
+it snapshots before/after into `content_versions` so every change is diffable
+and exactly rollbackable.
+
+Hard guarantees (all under test):
+
+* AI never publishes; publishing requires `status='approved'`.
+* Two sources that disagree produce a conflict report, never a chosen winner;
+  conflicted knowledge cannot generate proposals.
+* The quality gate blocks (not review-flags): invalid answer keys (exactly one
+  correct), duplicate questions (prompt+options vs the live bank), blank or
+  identical options, unsafe words, and **>=20 consecutive words reproduced
+  verbatim from a source** (copyright guard).
+* Every provider call — including the offline `mock` provider, and failures —
+  is metered in `ai_usage_logs` (tokens, latency, estimated USD) surfaced at
+  `/admin/content/usage`.
+* Uploads are size-capped, magic-byte-checked, zip-bomb-guarded, stored off
+  the web root, readable only through an admin route; deleting a source
+  removes its bytes.
+* Providers are pluggable (`AI_PROVIDER=mock|gemini|openai_compatible`); keys
+  live in the backend env. `python -m app.worker` processes the queue; the
+  inline admin "run now" endpoint is the dev path.
+* Retrieval: knowledge/chunks are searchable (`/admin/content/search`) with
+  provider embeddings when available (the mock ships a deterministic
+  hashed-BoW embedder); pgvector remains the swap-in, not a dependency.
+
+Known limits of this phase: extraction is *basic* (born-digital PDFs; scanned
+PDFs/images flag `ocr_needed` until an `OCR_COMMAND` hook is configured); the
+mock provider is a rule engine, not an LLM — swap `AI_PROVIDER` for real
+generation, the flow is identical; long books process head-first under the
+per-job chunk budget (documented in doc `notes`); the admin *product* UI is a
+dev console, not the final dashboard.
