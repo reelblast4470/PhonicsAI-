@@ -38,13 +38,34 @@ jobs:
           cache-dependency-path: api/requirements.txt
       - run: pip install -r requirements.txt
       - name: Migrate a clean database + guard model/migration drift
+        env:
+          PG_ADMIN: "postgresql://phonicsai:devloc…cret@127.0.0.1:5432/postgres"
+          DATABASE_URL: "postgresql+asyncpg://phonicsai:devlocal_only_not_a_secret@127.0.0.1:5432/phonicsai_ci"
         run: |
-          psql "$PG/postgres" -c 'CREATE DATABASE phonicsai_ci'
-          export DATABASE_URL="postgresql+asyncpg://phonicsai:devlocal_only_not_a_secret@127.0.0.1:5432/phonicsai_ci"
+          # no psql dependency: create the scratch db with asyncpg itself
+          python - <<'PYEOF'
+          import asyncio, asyncpg, os
+          async def main():
+              conn = await asyncpg.connect(os.environ['PG_ADMIN'])
+              if not await conn.fetchval("SELECT 1 FROM pg_database WHERE datname='phonicsai_ci'"):
+                  await conn.execute('CREATE DATABASE phonicsai_ci')
+              await conn.close()
+          asyncio.run(main())
+          PYEOF
           python -m alembic upgrade head
           python -m alembic check          # fails if models.py diverges from migrations
-          psql "$PG/phonicsai_ci" -tAc \
-            "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE' AND table_name <> 'alembic_version'"
+          python - <<'PYEOF'
+          import asyncio, asyncpg, os
+          async def main():
+              conn = await asyncpg.connect(os.environ['DATABASE_URL'].replace('+asyncpg', ''))
+              n = await conn.fetchval(
+                  "SELECT count(*) FROM information_schema.tables "
+                  "WHERE table_schema='public' AND table_type='BASE TABLE' "
+                  "AND table_name <> 'alembic_version'")
+              print(f'public tables after migrations: {n}')
+              await conn.close()
+          asyncio.run(main())
+          PYEOF
       - name: pytest
         env:
           TEST_DATABASE_URL: >-
@@ -62,7 +83,15 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get
-      - run: flutter analyze
+      - name: flutter analyze
+        run: |
+          flutter analyze 2>&1 | tee /tmp/analyze.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" != "0" ]; then
+            printf '::error::flutter analyze failed: %s\n' \
+              "$(grep -E 'error|warning|info' /tmp/analyze.log | head -40 | tr '\n' ' | ' | tr '"%\r' ' q')"
+            exit "$status"
+          fi
       - run: flutter test
 
   live-contract:
