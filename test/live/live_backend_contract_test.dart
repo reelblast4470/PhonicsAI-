@@ -19,11 +19,11 @@ import 'package:phonicsai/core/network/session_token_holder.dart';
 import 'package:phonicsai/core/storage/in_memory_secure_vault.dart';
 import 'package:phonicsai/core/storage/key_value_store.dart';
 import 'package:phonicsai/features/assessment/data/assessment_remote.dart';
+import 'package:phonicsai/features/auth/data/http_auth_repository.dart';
+import 'package:phonicsai/features/progress/data/backend_progress_sync.dart';
 import 'package:phonicsai/features/settings/application/support_service.dart';
 import 'package:phonicsai/features/tutor/data/api_tutor_service.dart';
 import 'package:phonicsai/features/tutor/domain/tutor_service.dart';
-import 'package:phonicsai/features/auth/data/http_auth_repository.dart';
-import 'package:phonicsai/features/progress/data/backend_progress_sync.dart';
 
 final base = Platform.environment['PHONICS_LIVE_BASE'] ?? '';
 
@@ -256,7 +256,7 @@ void main() {
         isTrue);
 
     // Support intake: adult-authored, parent-visible.
-    final sent = await const ApiSupportService(api).send(
+    final sent = await ApiSupportService(api).send(
       subject: 'Live contract check',
       body: 'Testing the intake queue end to end.',
       locale: 'en',
