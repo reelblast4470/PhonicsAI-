@@ -73,6 +73,15 @@ class Settings(BaseSettings):
     verbatim_max_words: int = 20        # >= this many consecutive words from a
                                         # source in generated content -> blocked
 
+    # ---- Phase 5: store verification + AI tutor --------------------------
+    billing_mode: str = "mock"            # mock | google_play | app_store | off
+    google_package: str = ""              # applicationId from Play Console
+    google_access_token: str = ""         # ops-minted androidpublisher OAuth token
+    appstore_shared_secret: str = ""
+    appstore_sandbox: bool = False
+    tutor_free_daily_messages: int = 3    # per learner, UTC day, server-counted
+    tutor_max_message_chars: int = 600
+
     uploads_dir: str = "data/uploads"
     upload_max_mb: int = 25
     upload_zip_max_uncompressed_mb: int = 60   # zip-bomb guard for docx/epub
@@ -98,6 +107,12 @@ class Settings(BaseSettings):
             raise RuntimeError(f"Unknown AI_PROVIDER={self.ai_provider!r}")
         if self.ai_provider in ("gemini", "openai_compatible") and not self.ai_api_key:
             raise RuntimeError(f"AI_PROVIDER={self.ai_provider} requires AI_API_KEY")
+        if self.billing_mode not in ("mock", "google_play", "app_store", "off"):
+            raise RuntimeError(f"Unknown BILLING_MODE={self.billing_mode!r}")
+        if self.is_production and self.billing_mode == "mock":
+            raise RuntimeError(
+                "Refusing to start: BILLING_MODE=mock would accept fake receipts "
+                "in production - use google_play/app_store or 'off'")
 
 
 @lru_cache

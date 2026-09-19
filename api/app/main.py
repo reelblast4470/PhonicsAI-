@@ -33,6 +33,8 @@ from .routers import (
     engagement,
     learners,
     progress,
+    support,
+    tutor,
 )
 
 log = logging.getLogger("phonicsai.api")
@@ -84,6 +86,10 @@ def create_app() -> FastAPI:
     # admin is mounted under its own guard; user tokens can never reach it
     app.include_router(admin.router, prefix=prefix)
     app.include_router(admin_content.router, prefix=prefix)
+    app.include_router(tutor.router, prefix=prefix)
+    app.include_router(tutor.admin_router, prefix=prefix)
+    app.include_router(support.router, prefix=prefix)
+    app.include_router(support.admin_router, prefix=prefix)
 
     # dev/staging admin console for the Phase-4 pipeline (a thin reference UI
     # over /api/v1/admin/content/*; never mounted in production)

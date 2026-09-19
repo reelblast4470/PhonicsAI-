@@ -4,9 +4,8 @@ A production-architecture Flutter client for a kids' phonics learning app with a
 AI tutor: **Android, iOS, Windows, and responsive web**, for readers aged 3–10.
 
 > **Status:** all 22 screens are implemented with real interaction logic. Backend
-> Phase 4 (AI content-intelligence pipeline: source ingestion → knowledge →
-> curriculum-mapped draft proposals → human approval → versioned publishing)
-> is live in `api/`. Every
+> Phase 4 (AI content-intelligence pipeline) and Phase 5 (AI tutor endpoint,
+> server-side receipt verification, support intake) are live in `api/`. Every
 > external system (auth, database, AI, speech, payments, notifications) sits
 > behind a clean interface with a clearly-labelled mock/offline adapter —
 > nothing is faked as if it were real. See [Integration readiness](#integration-readiness).
@@ -171,13 +170,16 @@ The client is complete and tested; deploying it "for real" still needs, in order
 
 1. **Backend**: auth, learners, content, progress, daily tasks, assessments,
    analytics, feedback, admin + audit and account-deletion cascade are built
-   and tested in `api/` (84 API tests + a live Flutter↔FastAPI contract test),
-   together with the Phase-3 real curriculum/adaptive loop and the Phase-4
-   AI content pipeline (upload → extract → map → draft → validate → human
-   approval → versioned publish, `/admin/content/*` + worker).
-   Still open: tutor SSE context endpoint, server-side store receipt
-   verification, support intake queueing, a production admin dashboard UI
-   (the dev console at `/admin-ui` is the reference implementation).
+   and tested in `api/` (104 API tests + a live Flutter↔FastAPI contract test),
+   together with the Phase-3 real curriculum/adaptive loop, the Phase-4 AI
+   content pipeline (upload → extract → map → draft → validate → human
+   approval → versioned publish) and the Phase-5 seams: tutor endpoint with
+   quota/safety (SSE + JSON), `BILLING_MODE`-plugged store receipt verification
+   with a replay lock, and the support intake queue the app already posts to.
+   Still open at deploy time: production store/AI credentials (Google Play &
+   App Store verifiers, real `AI_*` provider keys), a production admin
+   dashboard UI (dev console at `/admin-ui` is the reference implementation),
+   and token-by-token tutor rendering in the app (the API already streams).
 2. **Release signing**: keystore + `android/key.properties` (git-ignored by
    design), Play App Signing recommended; iOS cert/profile via Xcode.
 3. **Store material**: replace the generated launcher icons (all densities),

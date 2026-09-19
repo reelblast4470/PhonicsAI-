@@ -353,3 +353,48 @@ updated lesson through the public API**→rollback-identical flow, copilot
 reports/drafts, role and token isolation checks, audit rows, usage metering);
 alembic upgrade→downgrade→upgrade clean; `flutter` side untouched by design
 (curriculum content flows through the existing live-mode adapters).
+
+## Phase 5 — the last marked seams: tutor endpoint, receipts, support queue
+
+Three items were carried on the open list since Phase 1 with explicit
+`// open:` / `TODO(backend)` markers; all three are now closed on both sides
+of the wire (+3 tables, migration `1100e928bded`, 46→49 total):
+
+* **Tutor** — `routers/tutor.py`: learner-scoped `POST /reply` (SSE default,
+  `?sse=false` JSON) + `GET /starters` + `GET /exchanges`. Server-built
+  child context (no PII in the request body), blocked-topic pre-filter,
+  off-topic replies *flagged and stored* (`tutor_exchanges`) for the parent
+  report + `/admin/tutor/exchanges` review view; free-quota per UTC day
+  enforced server-side, lifted only by a verified subscription. Tutor answers
+  flow through the Phase-4 `AIService` abstraction → every provider call
+  (mock included) metered in `ai_usage_logs`, purpose `tutor`. Client:
+  `ApiTutorService` auto-swaps in behind profile binding; `PhonicsRuleTutor`
+  stays the honest offline/dev answer.
+* **Receipts** — `app/billing.py`: `POST /subscriptions/me/receipt` is the
+  *only* entitlement-flipping path. Verifiers: `mock` (dev/test, boot-refused
+  in production), `google_play` (androidpublisher REST), `app_store`
+  (verifyReceipt + sandbox fallback), `off`. Canceled/pending/refunded
+  purchase states map to honest 400s. `verified_receipts` unique
+  (store, transaction_id) = replay lock; cross-account reuse → 409. Client:
+  `SubscriptionController` verifies with the server first, *stays free* when
+  the server refuses, falls back to the local conservative rule only when
+  the network (not the store) is the problem, and `refresh()` now re-adopts
+  server truth (revocations land). `purchase()` refuses to say "Unlocked"
+  when the entitlement didn't actually flip.
+* **Support** — `routers/support.py`: the `/support/tickets` path the app's
+  `ApiSupportService` already targeted, plus the admin queue, `support`-role
+  reply rights *in this domain only*, parent notification on reply, every
+  mutation audited (`support.update`).
+
+Verified: pytest **104/104** (20 new: idempotent verification, replay lock,
+failure tokens, lifetime-without-expiry, store-product mapping, off/mismatch
+modes, production-boot refusal, SSE token reassembly == final text, flagging,
+quota-then-unlock, chat-disabled, 404-not-403 isolation, struggling-sound
+starters, admin review view, support loop incl. notification + audit rows,
+support-role domain split). Contract test gained a Phase-5 journey (tutor
+quota across the wire → receipt → unlocked → support post). Alembic
+upgrade→downgrade→upgrade clean. NOTE: this sandbox has no Flutter SDK and
+pub.dev is unreachable, so client edits were syntax/brace-verified and
+pattern-checked against existing adapters, but `flutter analyze`/`flutter
+test` must run in CI before merge — the mock-config defaults keep all local
+test paths behavior-identical.

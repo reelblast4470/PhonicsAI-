@@ -1071,6 +1071,76 @@ class ContentConflict(TimestampMixin, Base):
     )
 
 
+class SupportTicket(TimestampMixin, Base):
+    """Adult-written support intake. By contract carries NO learner data:
+    subject/body from a grown-up, locale/app metadata only. Free text here is
+    deliberate (support can't work otherwise) and stays parent-scoped."""
+
+    __tablename__ = "support_tickets"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    subject: Mapped[str] = mapped_column(String(140), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    locale: Mapped[str] = mapped_column(String(16), nullable=False, default="en")
+    app_version: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    platform: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
+    admin_reply: Mapped[str | None] = mapped_column(Text)
+    answered_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("admin_users.id", ondelete="SET NULL"))
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('open','in_progress','resolved','closed')",
+            name="ck_ticket_status"),
+    )
+
+
+class TutorExchange(TimestampMixin, Base):
+    """One question + answer of the AI tutor, kept for safety review and the
+    parent's 'redirected N times' count. 30-day retention is a deploy
+    responsibility (delete old rows in a scheduled sweep); the app itself
+    never reads ancient rows."""
+
+    __tablename__ = "tutor_exchanges"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    learner_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("learner_profiles.id", ondelete="CASCADE"), index=True, nullable=False)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+    chips: Mapped[list | None] = mapped_column(Jsonb, default=list)
+    action: Mapped[dict | None] = mapped_column(Jsonb)
+    flagged: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    provider: Mapped[str] = mapped_column(String(20), nullable=False, default="mock")
+    model: Mapped[str] = mapped_column(String(80), nullable=False, default="")
+
+
+class VerifiedReceipt(TimestampMixin, Base):
+    """Store receipts the SERVER confirmed, one row per store transaction,
+    ever. The unique (store, transaction_id) is the replay lock that makes a
+    stolen/reused token unable to grant a second entitlement."""
+
+    __tablename__ = "verified_receipts"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
+    store: Mapped[str] = mapped_column(String(16), nullable=False)
+    product_id: Mapped[str] = mapped_column(String(80), nullable=False)
+    transaction_id: Mapped[str] = mapped_column(String(140), nullable=False)
+    plan_key: Mapped[str] = mapped_column(String(40), nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    raw: Mapped[dict | None] = mapped_column(Jsonb, default=dict)
+    __table_args__ = (
+        UniqueConstraint("store", "transaction_id"),
+        CheckConstraint("store IN ('mock','google_play','app_store')",
+                        name="ck_receipt_store"),
+    )
+
+
 class AiUsageLog(TimestampMixin, Base):
     """Telemetry for every provider call (including 'mock', so counts are
     honest). Estimated cost only — never billing-grade."""

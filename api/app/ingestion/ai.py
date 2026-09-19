@@ -98,10 +98,26 @@ class AIService:
     async def copilot(self, prompt: str, context: dict) -> dict:
         raise NotImplementedError
 
+    async def tutor_reply(self, message: str, ctx: dict) -> dict:
+        raise NotImplementedError
+
+    async def tutor_starters(self, ctx: dict) -> list[str]:
+        struggling = [p for p in (ctx.get("struggling_phonemes") or []) if p][:3]
+        out = [f"what does '{p}' sound like?" for p in struggling[:2]]
+        out += [f"practice {p}" for p in struggling[-1:]] or ["how do I blend sounds?"]
+        return list(dict.fromkeys(out))[:4]
+
 
 # ===========================================================================
 # mock provider — deterministic rules, labelled as such everywhere
 # ===========================================================================
+
+_TUTOR_BLOCKED = re.compile(
+    r"\b(cheat|password|address|phone\s*number|e-?mail|sex|drugs?|kill|hurt|"
+    r"die|gun|weapon|money)\b|\d{3}[^a-z0-9]*\d{4}", re.I)
+_TUTOR_DIGRAPHS = {"sh": ("ship", "shark", "splash"), "ch": ("chip", "chair", "lunch"),
+                   "th": ("thin", "bath", "feather"), "ph": ("phone", "graph", "dolphin"),
+                   "wh": ("whale", "wheel"), "ck": ("duck", "kick"), "ng": ("ring", "king")}
 CATEGORY_RULES: list[tuple[str, re.Pattern]] = [
     ("phonics_rule", re.compile(
         r"(makes|says|sounds like|the sound)\b.{0,40}(/\S+/|\"[a-z]{1,4}\")"
@@ -308,6 +324,51 @@ class MockAIService(AIService):
     async def copilot(self, prompt: str, context: dict) -> dict:
         return {"intent": "unknown", "reply": ""}  # pipeline owns deterministic intents
 
+    async def tutor_reply(self, message: str, ctx: dict) -> dict:
+        """A real (if modest) rule tutor: the same five-shape policy the
+        client's offline engine implements, so mock mode behaves honestly and
+        tests exercise the true endpoint semantics."""
+        starters = await self.tutor_starters(ctx)
+        chips = starters[:3]
+        text = (message or "").strip().lower()
+        name = str(ctx.get("learner_first_name") or "friend")[:20].capitalize()
+        if _TUTOR_BLOCKED.search(text):
+            return {"text": f"I can only chat about sounds and reading, {name} — that one "
+                            "is for grown-ups. Want to try a sound game instead?",
+                    "chips": chips, "action": None, "flagged": True}
+        if re.search(r"\bblend|slide the sounds|stretch.{0,12}sound", text):
+            return {"text": "Blending is stretching sounds and sliding them together! "
+                            "Say /c/ … /a/ … /t/, then faster: caa-t → cat! Try it with "
+                            "the letter tiles: tap each sound, then swoop.",
+                    "chips": chips,
+                    "action": {"kind": "openGame", "target": "blending", "label": "Try blending"},
+                    "flagged": False}
+        dg = re.search(r"\b(sh|ch|th|ph|wh|ck|ng)\b", text)
+        if dg and re.search(r"sound|say|letter|spell|what|how|make", text):
+            d = dg.group(1)
+            w = _TUTOR_DIGRAPHS[d]
+            return {"text": f"The two letters '{d}' together make one sound: /{d}/ — like "
+                            f"{w[0]}, {w[1]}, {w[2]}. Say them slowly: {w[0]}… {w[1]}.",
+                    "chips": [f"practice {d}"] + chips[:2],
+                    "action": {"kind": "say", "target": d}, "flagged": False}
+        if re.search(r"silent e|magic e|quiet e", text):
+            return {"text": "Magic 'e' is silent but powerful — it makes the vowel before "
+                            "it say its name: tap → tape, kit → kite, hid → hide!",
+                    "chips": ["show me magic e"] + chips[:2],
+                    "action": {"kind": "openLesson", "target": "silent-e",
+                               "label": "Open silent-e"},
+                    "flagged": False}
+        if re.search(r"^(hi|hey|hello)\b|who are you", text):
+            return {"text": f"Hi {name}! I'm your phonics pal. Ask me about any sound — "
+                            "or we can warm up right now.",
+                    "chips": chips, "action": None, "flagged": False}
+        focus = (ctx.get("struggling_phonemes") or ["sh"])[0]
+        return {"text": f"Good question! Let's start with the sounds that need practice — "
+                        f"'{focus}' is ready for you. Say it with me and I'll listen!",
+                "chips": [f"practice {focus}"] + chips[:2],
+                "action": {"kind": "openPronunciation", "target": focus},
+                "flagged": False}
+
 
 def payload_note(item: dict) -> str:
     return ("Generated example content is an AI teaching example inspired by the "
@@ -400,6 +461,27 @@ class _HttpProviderBase(AIService):
 
     async def copilot(self, prompt: str, context: dict) -> dict:
         return {"intent": "unknown", "reply": ""}
+
+    async def tutor_reply(self, message: str, ctx: dict) -> dict:
+        system = (
+            "You are PhonicsAI's tutor for children aged 4-9 learning to read. "
+            "Answer only phonics/reading/practice questions in warm, very simple "
+            "words (max 600 characters). If a question is off-topic or asks for "
+            "personal information, answer with a kind redirect to reading and set "
+            '\"flagged\": true. Never repeat anything the child reveals about '
+            "themselves or their family. Return strict JSON: "
+            '{"text": "...", "chips": ["...", "...", "..."], "action": {"kind": '
+            '"openLesson|openGame|openReading|openPronunciation|say|none", '
+            '"target": "..."} or null, "flagged": false}.')
+        data = await self._call_json(
+            system, json.dumps({"question": message[:600], "learner_context": ctx}),
+            "tutor")
+        if not isinstance(data, dict):
+            raise AiError("bad_tutor_response", "provider reply unparseable")
+        return {"text": str(data.get("text") or "")[:600],
+                "chips": [str(c)[:40] for c in (data.get("chips") or [])[:3]],
+                "action": data.get("action") if isinstance(data.get("action"), dict) else None,
+                "flagged": bool(data.get("flagged"))}
 
 
 _CATEGORIES = {"phonics_rule", "reading_strategy", "vocabulary", "pronunciation",

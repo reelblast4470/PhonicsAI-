@@ -339,6 +339,36 @@ class SubscriptionEventIn(Strict):
     store_receipt: str | None = Field(default=None, max_length=512)
 
 
+# --- Phase 5: receipt verification, tutor, support -------------------------
+
+
+class ReceiptIn(Strict):
+    store: str = Field(pattern=r"^(mock|google_play|app_store)$")
+    product_id: str = Field(min_length=2, max_length=80)
+    purchase_token: str = Field(min_length=8, max_length=512)
+    transaction_id: str | None = Field(default=None, max_length=140)
+
+
+class TutorIn(Strict):
+    message: str = Field(min_length=1, max_length=600)
+    # Parent-gate convenience flag: when the family turned free chat off the
+    # endpoint refuses at all (the refusal itself is server-side regardless).
+    open_chat_allowed: bool = True
+
+
+class SupportTicketIn(Strict):
+    subject: str = Field(min_length=3, max_length=140)
+    body: str = Field(min_length=10, max_length=8000)
+    locale: str = Field(default="en", max_length=16)
+    app_version: str = Field(default="", max_length=20)
+    platform: str = Field(default="", max_length=20)
+
+
+class SupportTicketPatch(Strict):
+    status: str = Field(pattern=r"^(open|in_progress|resolved|closed)$")
+    admin_reply: str | None = Field(default=None, max_length=4000)
+
+
 class AdminLoginIn(Strict):
     username: str = Field(min_length=2, max_length=60)
     password: str = Field(min_length=1, max_length=128)

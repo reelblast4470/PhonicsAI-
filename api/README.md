@@ -10,7 +10,7 @@ app/
   main.py        create_app(): middleware (CORS, headers, limiter), routers
   config.py      env-driven Settings; refuses dev defaults when ENVIRONMENT=production
   db.py          async engine/session factory (SQLAlchemy 2.0, asyncpg)
-  models.py      46 tables: users/parents/learners, content tree, learning ledger,
+  models.py      49 tables: users/parents/learners, content tree, learning ledger,
                  SRS, daily tasks, achievements, assessments, feedback, billing,
                  notifications, admin + audit
   schemas.py     strict request models (extra="forbid") + response models
@@ -29,9 +29,10 @@ ingestion/       Phase-4 pipeline: extract → chunk → AI extract/map/draft �
                  quality gate → proposals (drafts only; publishing is human)
 worker.py        `python -m app.worker` — queued-job processor (SKIP LOCKED
                  claims, safe with N workers; --once drains the queue)
-tests/           84 pytest tests incl. a full end-to-end journey test and the
+tests/           104 pytest tests incl. a full end-to-end journey test, the
                  Phase-4 acceptance suite (upload → publish → learner sees
-                 updated content → rollback)
+                 updated content → rollback) and the Phase-5 seam suite
+                 (receipts, tutor quota/safety, support queue)
 ```
 
 ## Quickstart (dev)
@@ -127,7 +128,8 @@ Goal: an RPO of 24 h with plain dumps, ~5 min with WAL archiving; RTO < 1 h.
    ```bash
    createdb phonicsai_restore
    pg_restore -d phonicsai_restore /tmp/phonicsai_<ts>.dump
-   pg_dump phonicsai_restore | grep -c "CREATE TABLE"   # expect 46
+   pg_dump phonicsai_restore | grep -c "CREATE TABLE"   # expect 50 (49 app
+   #   tables + alembic_version — bump the count with every migration)
    ```
 
    Boot the app against the restored DB and run `pytest tests/test_e2e_flow.py`.
@@ -223,3 +225,43 @@ mock provider is a rule engine, not an LLM — swap `AI_PROVIDER` for real
 generation, the flow is identical; long books process head-first under the
 per-job chunk budget (documented in doc `notes`); the admin *product* UI is a
 dev console, not the final dashboard.
+
+## Phase 5 — the last marked seams, closed
+
+**AI tutor** (`routers/tutor.py`): `POST /learners/{id}/tutor/reply` (SSE by
+default, `?sse=false` for JSON) and `GET .../starters`. The learner's context
+(name, age, level, struggling sounds) is derived server-side from rows we
+already have — the request carries only the child's message. A child-safety
+policy runs *before* the model (blocked-topic patterns get a deterministic
+kind redirect); off-topic model answers come back `flagged`, stored in
+`tutor_exchanges` and reviewable at `/admin/tutor/exchanges?flagged_only=true`
+— flags feed the parent's "redirected N times" report, never a punishment.
+Free accounts get `TUTOR_FREE_DAILY_MESSAGES` questions/day counted here; a
+**server-verified** Plus subscription (not a client event report) lifts it.
+The Flutter adapter (`features/tutor/data/api_tutor_service.dart`) switches
+itself in once a profile is bound; the local rule engine keeps answering,
+honestly labelled, whenever it is not.
+
+**Receipt verification** (`app/billing.py`): `POST /subscriptions/me/receipt`
+is the only endpoint that flips entitlements. `BILLING_MODE=mock` (dev/test;
+boot-refused in production), `google_play` (androidpublisher REST, ops-minted
+OAuth token), `app_store` (verifyReceipt, sandbox auto-fallback), or `off`
+(honest 503). Verified store transactions land in `verified_receipts` with a
+unique (store, transaction_id) — the replay lock: same receipt, second
+account → 409. Client-reported events keep their reconciliation-only role.
+
+**Support intake** (`routers/support.py`): `POST /support/tickets` (the path
+the app already targeted), parent-visible thread + notification on reply,
+admin queue at `/admin/support/tickets` with audit on every change. The
+`support` admin role may answer tickets in this domain (that *is* its job)
+while remaining read-only for content.
+
+Tables 46→49 (`tutor_exchanges`, `verified_receipts`, `support_tickets`),
+migration `1100e928bded` (additive, reversible). Tutor exchanges carry a
+documented 30-day retention expectation swept at deploy time.
+
+Known limits: SSE is produced server-side but the Flutter app consumes the
+JSON form (token-by-token rendering is polish, the wire format is final);
+store verifiers are real REST calls behind config and only exercised against
+the mock verifier here — Play/App Store credentials must be wired at deploy;
+the tutor works on the offline mock rule engine until real `AI_*` keys land.
