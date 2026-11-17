@@ -68,6 +68,84 @@ class ApiClient {
   Future<Map<String, dynamic>> deleteJson(String path) =>
       _send('DELETE', path);
 
+  /// POSTs and reads a `text/event-stream` answer, yielding each complete
+  /// event as soon as its blank-line terminator arrives. Errors go through the
+  /// same status table as the JSON calls, so a 429 is still a rate limit.
+  ///
+  /// Single attempt: a stream that has already begun cannot be replayed, so
+  /// the transparent 401-refresh and timeout retry used by [getJson] are not
+  /// applied here.
+  Stream<SseEvent> postEvents(String path, {Map<String, Object?>? body}) async* {
+    if (!config.hasBackend) {
+      throw const ApiNotConfiguredFailure();
+    }
+    final request = http.Request('POST', Uri.parse('${config.apiBaseUrl}$path'))
+      ..headers.addAll({
+        ...await _headers(),
+        'Accept': 'text/event-stream',
+        'Content-Type': 'application/json',
+      })
+      ..body = jsonEncode(body ?? const {});
+    final response = await _openStream(request);
+    if (response.statusCode >= 400) {
+      final errorBody = await response.stream.bytesToString();
+      throw _mapStatus(response.statusCode, errorBody);
+    }
+
+    var eventName = '';
+    final dataLines = <String>[];
+    var pending = '';
+    await for (final text in response.stream.transform(utf8.decoder)) {
+      pending += text;
+      while (true) {
+        final newline = pending.indexOf('\n');
+        if (newline < 0) break;
+        final line = pending.substring(0, newline).replaceFirst(RegExp(r'\r$'), '');
+        pending = pending.substring(newline + 1);
+        if (line.isEmpty) {
+          if (dataLines.isNotEmpty) {
+            yield SseEvent(
+              eventName.isEmpty ? 'message' : eventName,
+              dataLines.join('\n'),
+            );
+          }
+          eventName = '';
+          dataLines.clear();
+        } else if (line.startsWith('event:')) {
+          eventName = line.substring(6).trim();
+        } else if (line.startsWith('data:')) {
+          var value = line.substring(5);
+          if (value.startsWith(' ')) value = value.substring(1);
+          dataLines.add(value);
+        }
+      }
+    }
+    if (dataLines.isNotEmpty) {
+      yield SseEvent(
+        eventName.isEmpty ? 'message' : eventName,
+        dataLines.join('\n'),
+      );
+    }
+  }
+
+  Future<http.StreamedResponse> _openStream(http.Request request) async {
+    try {
+      return await _http.send(request).timeout(timeout2);
+    } on TimeoutException {
+      throw const AppFailure(
+        kind: FailureKind.timeout,
+        message: 'The tutor is taking too long to answer.',
+        detail: 'request timed out',
+      );
+    } on http.ClientException catch (e) {
+      throw AppFailure(
+        kind: FailureKind.offline,
+        message: 'No connection right now.',
+        detail: e.message,
+      );
+    }
+  }
+
   Future<dynamic> _sendRaw(
     String method,
     String path, {
@@ -194,6 +272,15 @@ class ApiClient {
     }
     return null;
   }
+}
+
+/// One complete server-sent event: its `event:` name (or `message`) and the
+/// joined `data:` payload.
+class SseEvent {
+  const SseEvent(this.event, this.data);
+
+  final String event;
+  final String data;
 }
 
 class ApiNotConfiguredFailure extends AppFailure {

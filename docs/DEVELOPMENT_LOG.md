@@ -398,3 +398,20 @@ pub.dev is unreachable, so client edits were syntax/brace-verified and
 pattern-checked against existing adapters, but `flutter analyze`/`flutter
 test` must run in CI before merge — the mock-config defaults keep all local
 test paths behavior-identical.
+
+## Phase 6 follow-up — streamed tutor replies (live mode)
+
+* `ApiClient.postEvents` reads `text/event-stream` answers through the same
+  HTTP door and status mapping as the JSON calls (one attempt; a started
+  stream cannot be replayed, so no 401-retry or timeout-retry).
+* `ApiTutorService` uses `?sse=true` whenever the caller passes `onToken`
+  (the tutor controller always does). `token` events extend the partial text;
+  the `final` event supplies chips, action and the flag. A stream that ends
+  without `final` fails honestly. Without `onToken`, the JSON path is unchanged.
+* Tests: `test/features/tutor_streaming_test.dart` (cumulative partials, final
+  text wins, request shape, quota 429 mapping, truncated stream).
+* `ApiSseStream` (the older `lines()` reader wired in `infrastructure.dart`) is
+  no longer used by the tutor; left in place pending a cleanup.
+
+NOTE: this sandbox has no Flutter/Dart SDK, so these Dart changes are
+unverified here. `flutter analyze` and `flutter test` must run in CI before merge.
